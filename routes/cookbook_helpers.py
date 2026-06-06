@@ -5,11 +5,16 @@ import logging
 import os
 import re
 import shlex
+import tempfile
+from pathlib import Path
 
 from fastapi import HTTPException
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# Shared tmux/download log dir (used by cookbook + shell routes).
+TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
 
 
 # HuggingFace repo IDs are <org>/<name>, both alphanumerics plus ._-

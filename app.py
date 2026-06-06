@@ -121,6 +121,7 @@ if AUTH_ENABLED:
         "/api/auth/integrations/presets",
         "/api/health",
         "/api/version",
+        "/api/bundled-llm/status",
         "/login",
     }
     AUTH_EXEMPT_PREFIXES = ["/static"]
@@ -526,6 +527,14 @@ app.include_router(setup_assistant_routes(task_scheduler))
 from routes.calendar_routes import setup_calendar_routes
 app.include_router(setup_calendar_routes())
 
+# Bundled local LLM (turnkey mode — no Ollama)
+from routes.bundled_llm_routes import setup_bundled_llm_routes
+app.include_router(setup_bundled_llm_routes())
+
+# Model Download Hub (bundled GGUF catalog)
+from routes.model_hub_routes import setup_model_hub_routes
+app.include_router(setup_model_hub_routes())
+
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
@@ -600,7 +609,7 @@ app.include_router(setup_contacts_routes())
 
 def _serve_html_with_nonce(request: Request, file_path: str) -> HTMLResponse:
     """Read an HTML file and inject the CSP nonce into inline <script> tags."""
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         html = f.read()
     nonce = getattr(request.state, "csp_nonce", "")
     html = html.replace("{{CSP_NONCE}}", nonce)
@@ -896,7 +905,18 @@ async def startup_event():
                 logger.warning(f"Nightly skill audit failed: {e}")
 
     _startup_tasks.append(asyncio.create_task(_skill_audit_nightly_loop()))
-    # Auto-detect local Ollama instance — run in background to avoid blocking startup
+    # Turnkey bundled local LLM (llama-cpp-python) — before Ollama fallback
+    async def _start_bundled_llm():
+        try:
+            from services import bundled_llm
+            if await bundled_llm.ensure_ready():
+                logger.info("Bundled local LLM ready at %s", bundled_llm.base_url())
+        except Exception as e:
+            logger.debug("Bundled LLM startup: %s", e)
+
+    _startup_tasks.append(asyncio.create_task(_start_bundled_llm()))
+
+    # Auto-detect local Ollama instance — fallback when bundled LLM is off/unavailable
     async def _detect_ollama():
         try:
             import shutil
@@ -954,4 +974,9 @@ async def shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    try:
+        from services import bundled_llm
+        bundled_llm.stop_server()
+    except Exception as e:
+        logger.debug("Bundled LLM shutdown: %s", e)
     logger.info("Application shutdown complete")

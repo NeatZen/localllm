@@ -4,13 +4,17 @@ import asyncio
 import json
 import logging
 import os
-import pty
-import fcntl
+import sys
 import shlex
 import shutil
 import uuid
-import tempfile
 from pathlib import Path
+
+if sys.platform != "win32":
+    import pty
+    import fcntl
+
+from routes.cookbook_helpers import TMUX_LOG_DIR
 from typing import Dict, Any
 
 from fastapi import APIRouter, Request, HTTPException
@@ -57,7 +61,6 @@ def _find_line_break(buf):
 EXEC_TIMEOUT = 30  # seconds — shorter than agent's 60s
 STREAM_TIMEOUT = 120  # default for short commands
 MAX_OUTPUT = 200_000  # truncate limit
-TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
 
 
 class ShellExecRequest(BaseModel):
@@ -97,6 +100,10 @@ async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, An
 
 async def _generate_pty(cmd: str, timeout: int, request: Request):
     """Run command in a pseudo-TTY so tqdm/progress bars work natively."""
+    if sys.platform == "win32":
+        yield f"data: {json.dumps({'stream': 'stderr', 'data': 'PTY mode is not available on Windows'})}\n\n"
+        yield f"data: {json.dumps({'exit_code': 1})}\n\n"
+        return
     loop = asyncio.get_event_loop()
     master_fd, slave_fd = pty.openpty()
 

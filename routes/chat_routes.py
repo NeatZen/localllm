@@ -87,6 +87,11 @@ def _message_needs_tools(text: str) -> bool:
     return any(p.search(text) for p in _TOOL_INTENT_PATTERNS)
 
 
+def _is_bundled_local_endpoint(endpoint_url: str) -> bool:
+    url = (endpoint_url or "").lower()
+    return ":11435/" in url or ":11435/v1" in url
+
+
 def setup_chat_routes(
     session_manager,
     chat_handler,
@@ -276,6 +281,14 @@ def setup_chat_routes(
 
         # Ensure session has auth headers
         resolve_session_auth(sess, session)
+
+        # Built-in CPU model: agent mode is too slow (large tool payloads, single
+        # inference slot). Force plain chat so users get replies in seconds.
+        if _is_bundled_local_endpoint(sess.endpoint_url) and chat_mode == "agent":
+            chat_mode = "chat"
+            user_requested_agent = False
+            auto_escalated = False
+            logger.info("chat→chat forced for built-in local CPU model")
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"

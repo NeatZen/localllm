@@ -16,7 +16,7 @@ from src.auth_helpers import require_user
 from pydantic import BaseModel
 
 from core.middleware import require_admin
-from routes.shell_routes import TMUX_LOG_DIR
+from routes.cookbook_helpers import TMUX_LOG_DIR
 
 logger = logging.getLogger(__name__)
 

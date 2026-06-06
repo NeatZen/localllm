@@ -39,7 +39,9 @@ RUN mkdir -p data logs
 # update them) silently fails on EPERM, breaking skill extraction,
 # prefs persistence, mail attachments, etc.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Strip CRLF when the repo is checked out on Windows (otherwise the shebang
+# becomes /bin/sh\r and the container fails with "no such file or directory").
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 
 EXPOSE 7000
 

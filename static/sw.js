@@ -45,6 +45,7 @@ const PRECACHE = [
   '/static/js/censor.js',
   '/static/js/settings.js',
   '/static/js/admin.js',
+  '/static/js/modelHub.js',
   '/static/js/init.js',
   '/static/js/slashCommands.js',
   '/static/js/emailInbox.js',

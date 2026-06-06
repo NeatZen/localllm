@@ -13277,6 +13277,107 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   background: var(--border);
   border-color: var(--red);
 }
+
+/* Model Download Hub */
+.model-hub-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.model-hub-row:last-child { border-bottom: none; }
+.model-hub-row.is-active {
+  background: color-mix(in srgb, var(--red) 6%, transparent);
+  margin: 0 -8px;
+  padding: 10px 8px;
+  border-radius: 8px;
+}
+.model-hub-row-main { flex: 1; min-width: 0; }
+.model-hub-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.model-hub-name { font-size: 13px; font-weight: 600; }
+.model-hub-desc {
+  font-size: 11px;
+  opacity: 0.65;
+  line-height: 1.45;
+  margin-bottom: 4px;
+}
+.model-hub-meta {
+  font-size: 10px;
+  opacity: 0.45;
+}
+.model-hub-tags { margin-left: 4px; }
+.model-hub-tag {
+  display: inline-block;
+  padding: 1px 5px;
+  margin-right: 4px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.model-hub-badge {
+  font-size: 9px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.model-hub-badge.active {
+  background: color-mix(in srgb, var(--red) 18%, transparent);
+  color: var(--red);
+}
+.model-hub-badge.installed {
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  opacity: 0.7;
+}
+.model-hub-badge.downloading {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: var(--red);
+}
+.model-hub-badge.error {
+  background: color-mix(in srgb, #e06c75 20%, transparent);
+  color: #e06c75;
+}
+.model-hub-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.model-hub-active-label {
+  font-size: 11px;
+  opacity: 0.45;
+}
+.model-hub-progress {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+.model-hub-progress-fill {
+  height: 100%;
+  background: var(--red);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+.model-hub-error {
+  font-size: 10px;
+  color: #e06c75;
+  margin-top: 4px;
+  word-break: break-word;
+}
+
 .admin-spinner {
   display: inline-block;
   width: 12px;

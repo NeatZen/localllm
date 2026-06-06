@@ -8,6 +8,7 @@ build/
 !static/js/editor/build/
 venv/
 .venv/
+venv-gpu-broken-*/
 *.egg
 
 # Environment
@@ -15,7 +16,10 @@ venv/
 !.env.example
 
 # Data — all user data stays local
-data/
+data/*
+!data/model-hub/
+data/model-hub/*
+!data/model-hub/catalog.json
 !services/hwfit/data/
 !services/hwfit/data/hf_models.json
 logs/

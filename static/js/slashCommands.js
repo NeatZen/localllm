@@ -139,10 +139,11 @@ function _showSetupEndpointChoices() {
   return slashReply(
     '<div class="setup-guide-no-censor" style="display:grid;gap:10px;">' +
       '<div>' +
-        '<div>Quick start: add your first AI endpoint by pasting it in chat.</div>' +
+        '<div><strong>Built-in AI:</strong> Odysseus can run a local model automatically — no Ollama or API keys needed. If setup is still running, wait a moment and pick a model from the dropdown.</div>' +
+        '<div style="margin-top:6px;">Or paste your own endpoint URL / API key below.</div>' +
       '</div>' +
       '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:color-mix(in srgb,var(--bg) 88%,var(--fg) 12%);">' +
-        '<div style="font-weight:700;margin-bottom:6px;">' + SETUP_LOCAL_ICON + 'Local setup</div>' +
+        '<div style="font-weight:700;margin-bottom:6px;">' + SETUP_LOCAL_ICON + 'Local setup (advanced)</div>' +
         '<div>Paste endpoint URL in chat (example):</div>' +
         '<pre style="margin:4px 0 0;"><code>http://localhost:11434/v1</code></pre>' +
         '<div style="margin-top:4px;">or</div>' +
@@ -161,9 +162,9 @@ function _showSetupEndpointChoices() {
 function _showSetupEndpointChoicesStreamed(options = {}) {
   const blocks = [
     options.simple
-      ? { kind: 'p', text: 'Paste in chat below either' }
-      : { kind: 'p', html: '<strong>Quick start:</strong> add your first AI endpoint by pasting it in chat.' },
-    { kind: 'heading', html: SETUP_LOCAL_ICON + 'Local setup' },
+      ? { kind: 'p', text: 'Built-in AI should appear in the model dropdown automatically. Or paste your own endpoint below.' }
+      : { kind: 'p', html: '<strong>Built-in AI</strong> runs locally with no setup. If the model dropdown is empty, wait for download to finish or paste your own endpoint below.' },
+    { kind: 'heading', html: SETUP_LOCAL_ICON + 'Local setup (advanced)' },
     { kind: 'p', text: 'Paste endpoint URL in chat (example):' },
     {
       kind: 'code',

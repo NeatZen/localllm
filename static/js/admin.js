@@ -3,6 +3,7 @@
 
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
+import modelHubModule from './modelHub.js';
 import { providerLogo } from './providers.js';
 
 let initialized = false;
@@ -1811,6 +1812,7 @@ function refreshAll() {
   loadEndpoints();
   loadBuiltinTools();
   loadMcpServers();
+  if (typeof modelHubModule.refresh === 'function') modelHubModule.refresh();
 }
 
 /* ═══════════════════════════════════════════

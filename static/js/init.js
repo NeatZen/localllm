@@ -370,3 +370,56 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
   else window.addEventListener('load', release);
   setTimeout(release, 1200);  // hard fallback — never leave the splash hidden
 })();
+
+/* ── Turnkey bundled local AI — show friendly status on the welcome screen ── */
+(function () {
+  const tip = document.querySelector('#welcome-screen .welcome-tip');
+  if (!tip) return;
+
+  let stopped = false;
+
+  async function poll() {
+    if (stopped) return;
+    try {
+      const res = await fetch('/api/bundled-llm/status', { credentials: 'same-origin' });
+      if (!res.ok) return;
+      const s = await res.json();
+      if (!s.enabled) return;
+
+      if (s.state === 'downloading') {
+        tip.textContent = s.message || 'Downloading your local AI (one-time, ~2 GB)...';
+      } else if (s.state === 'starting') {
+        tip.textContent = 'Starting your built-in AI...';
+      } else if (s.state === 'running' && s.healthy) {
+        tip.textContent = 'Built-in AI is ready — Chat mode is on for faster replies on your PC.';
+        const agentBtn = document.getElementById('mode-agent-btn');
+        const chatBtn = document.getElementById('mode-chat-btn');
+        if (agentBtn && chatBtn) {
+          agentBtn.classList.remove('active');
+          chatBtn.classList.add('active');
+          const ts = Storage.getJSON(Storage.KEYS.TOGGLES, {});
+          ts.mode = 'chat';
+          Storage.setJSON(Storage.KEYS.TOGGLES, ts);
+          document.querySelectorAll('[data-mode-tool]').forEach((b) => {
+            b.style.display = 'none';
+          });
+        }
+        stopped = true;
+        if (typeof window.refreshModels === 'function') window.refreshModels();
+        return;
+      } else if (s.state === 'missing_model') {
+        tip.textContent = 'Run install-turnkey.ps1 once to download the built-in AI.';
+      } else if (s.state === 'error') {
+        tip.textContent = s.message || 'Built-in AI setup needs attention — see Settings.';
+      } else {
+        return;
+      }
+      setTimeout(poll, 3000);
+    } catch (_) {
+      setTimeout(poll, 5000);
+    }
+  }
+
+  if (document.readyState === 'complete') poll();
+  else window.addEventListener('load', poll);
+})();
