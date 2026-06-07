@@ -506,7 +506,17 @@ function _rerenderCachedModels() {
         });
         const backend = f.backend || 'vllm';
         const serveModel = m.is_local_dir && m.path ? `${m.path}/${repo}` : repo;
+        const _cacheSrv = document.getElementById('hwfit-cache-server');
+        let _serveHost = '';
+        if (_cacheSrv && _cacheSrv.value !== 'local') {
+          const _srv = _envState.servers.find(s => s.host === _cacheSrv.value) || _envState.servers[parseInt(_cacheSrv.value)];
+          _serveHost = _srv?.host || '';
+        }
         if (backend === 'llamacpp') {
+          if (m.gguf_file && _isWindows() && !_serveHost) {
+            // Windows local: use resolved path from cache scan (bash find/$() is blocked).
+            f._gguf_path = m.gguf_file.replace(/\\/g, '/');
+          } else {
           // For multi-part GGUFs, llama.cpp requires the first split
           // (-00001-of-NNNNN.gguf). Prefer it (sorted, so UD-IQ4_XS/001 comes
           // before Q4_K_M/001 etc); fall back to any single GGUF sorted.
@@ -520,6 +530,7 @@ function _rerenderCachedModels() {
           f._gguf_path = m.is_local_dir && m.path
             ? `$({ find ${_ldir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${_ldir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`
             : `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
+          }
         }
         if (f.reasoning_parser) {
           const _rpEl2 = panel.querySelector('[data-field="reasoning_parser"]');
@@ -1499,9 +1510,19 @@ export async function _fetchCachedModels() {
     if (host) { qp.set('host', host); const _sp4 = _getPort(host); if (_sp4) qp.set('ssh_port', _sp4); const _plat = _getPlatform(host); if (_plat) qp.set('platform', _plat); }
     if (modelDirs.length) qp.set('model_dir', modelDirs.join(','));
     const params = qp.toString() ? `?${qp}` : '';
-    const res = await fetch(`/api/model/cached${params}`);
-    if (!res.ok) throw new Error(res.statusText);
+    const res = await fetch(`/api/model/cached${params}`, { credentials: 'same-origin' });
+    if (!res.ok) {
+      let detail = res.statusText || `HTTP ${res.status}`;
+      try {
+        const errBody = await res.json();
+        detail = errBody.error || errBody.detail || detail;
+      } catch {}
+      throw new Error(detail);
+    }
     const data = await res.json();
+    if (data.error && !(data.models || []).length) {
+      throw new Error(data.error);
+    }
     _dlWp.destroy();
 
     const ready = data.models.filter(m => m.status === 'ready' && !m.size.includes('MB'));

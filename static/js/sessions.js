@@ -27,6 +27,121 @@ const _INCOGNITO_SESSIONS_KEY = 'ody-incognito-sessions'; // sessionStorage key 
 const _isMac = /Mac|iPhone|iPad/.test(navigator.platform);
 const _mod = _isMac ? '⌘' : 'Ctrl';
 
+/** Switch UI + toggle storage to Agent mode (required for workspace tool use). */
+export function activateAgentMode({ workspace = false } = {}) {
+  const ts = Storage.loadToggleState();
+  ts.mode = 'agent';
+  if (workspace) {
+    ts.bash_agent = true;
+    ts.web_agent = true;
+  }
+  Storage.saveToggleState(ts);
+  const agentBtn = document.getElementById('mode-agent-btn');
+  const chatBtn = document.getElementById('mode-chat-btn');
+  if (agentBtn && chatBtn) {
+    agentBtn.classList.add('active');
+    chatBtn.classList.remove('active');
+    const toggle = agentBtn.closest('.mode-toggle');
+    if (toggle) toggle.classList.remove('mode-chat');
+  }
+  document.querySelectorAll('[data-mode-tool]').forEach(b => { b.style.display = ''; });
+  const bashBtn = document.getElementById('bash-toggle-btn');
+  const bashChk = document.getElementById('bash-toggle');
+  const webBtn = document.getElementById('web-toggle-btn');
+  const webChk = document.getElementById('web-toggle');
+  if (bashBtn) bashBtn.classList.add('active');
+  if (bashChk) bashChk.checked = true;
+  if (webBtn) webBtn.classList.add('active');
+  if (webChk) webChk.checked = true;
+  const resChk = document.getElementById('research-toggle');
+  if (resChk && resChk.checked) {
+    resChk.checked = false;
+    const resBtn = document.getElementById('research-toggle-btn');
+    if (resBtn) resBtn.style.display = 'none';
+  }
+}
+
+function _removeWorkspaceChatBannerEl() {
+  document.getElementById('workspace-chat-banner')?.remove();
+}
+
+function _clearWorkspaceChatContext() {
+  const hadWorkspace = !!window._activeWorkspaceProjectId;
+  _removeWorkspaceChatBannerEl();
+  window._activeWorkspaceProjectId = null;
+  const msgInput = document.getElementById('message');
+  if (msgInput && /project|workspace/i.test(msgInput.placeholder)) {
+    msgInput.placeholder = 'Message Odysseus...';
+  }
+  if (hadWorkspace) {
+    const ts = Storage.loadToggleState();
+    ts.mode = 'chat';
+    Storage.saveToggleState(ts);
+    const agentBtn = document.getElementById('mode-agent-btn');
+    const chatBtn = document.getElementById('mode-chat-btn');
+    if (agentBtn && chatBtn) {
+      agentBtn.classList.remove('active');
+      chatBtn.classList.add('active');
+      const toggle = agentBtn.closest('.mode-toggle');
+      if (toggle) toggle.classList.add('mode-chat');
+    }
+  }
+}
+
+function _showWorkspaceChatBanner(meta) {
+  _removeWorkspaceChatBannerEl();
+  if (!meta?.workspace_project_id) return;
+  window._activeWorkspaceProjectId = meta.workspace_project_id;
+  const projectLabel = (meta.name || '').replace(/^Workspace:\s*/i, '').trim() || 'project';
+  const msgInput = document.getElementById('message');
+  if (msgInput) {
+    msgInput.placeholder = `Agent workspace — ask me to build or change files in "${projectLabel}"…`;
+  }
+  const anchor = document.querySelector('.chat-input-wrap, .input-row, #message')?.closest('.chat-bar')
+    || document.querySelector('.chat-bar');
+  if (!anchor) return;
+  const banner = document.createElement('div');
+  banner.id = 'workspace-chat-banner';
+  banner.className = 'workspace-chat-banner';
+  banner.innerHTML = `
+    <span class="ws-chat-banner-icon" aria-hidden="true">📁</span>
+    <span class="ws-chat-banner-text"><strong>Agent Workspace:</strong> ${projectLabel.replace(/</g, '&lt;')}
+      <span class="ws-chat-banner-hint"> — file writes and commands need your approval in the Workspace panel</span>
+    </span>
+    <button type="button" class="ws-chat-banner-btn" id="ws-chat-open-panel">Open Workspace</button>
+  `;
+  anchor.parentNode?.insertBefore(banner, anchor);
+  banner.querySelector('#ws-chat-open-panel')?.addEventListener('click', () => {
+    import('./workspace.js').then(mod => {
+      const fn = mod.open || mod.default?.open;
+      if (fn) fn();
+    }).catch(() => {});
+  });
+}
+
+function _syncWorkspaceChatContext(meta) {
+  if (meta?.workspace_project_id) {
+    window._activeWorkspaceProjectId = meta.workspace_project_id;
+    activateAgentMode({ workspace: true });
+    _showWorkspaceChatBanner(meta);
+  } else if (meta && !meta.workspace_project_id) {
+    // Explicit non-workspace session — clear stale panel/Open-in-Chat context
+    _clearWorkspaceChatContext();
+  }
+  // meta undefined: session list not hydrated yet — keep context (Open in Chat mid-flow)
+}
+
+/** Bind UI to a workspace project (used when opening from Workspace panel). */
+export function bindWorkspaceChatContext(projectId, projectName) {
+  if (!projectId) return;
+  window._activeWorkspaceProjectId = projectId;
+  activateAgentMode({ workspace: true });
+  _showWorkspaceChatBanner({
+    workspace_project_id: projectId,
+    name: projectName ? `Workspace: ${projectName}` : 'Workspace',
+  });
+}
+
 function _getIncognitoIds() {
   try { return JSON.parse(sessionStorage.getItem(_INCOGNITO_SESSIONS_KEY) || '[]'); } catch { return []; }
 }
@@ -61,6 +176,7 @@ let _sessionListFocused = false;
 function _deselectCurrentSession(sid) {
   if (currentSessionId !== sid) return;
   currentSessionId = null;
+  _clearWorkspaceChatContext();
   uiModule.el('chat-history').innerHTML = '';
   uiModule.el('current-meta').textContent = 'Odysseus Chat';
   Storage.remove('lastSessionId');
@@ -1302,7 +1418,7 @@ function _animateSessionRowsRemoving(ids, selector) {
   return new Promise(resolve => setTimeout(resolve, 520));
 }
 
-export async function loadSessions() {
+export async function loadSessions({ skipAutoSelect = false } = {}) {
   try {
     // Delete incognito sessions left over from a previous page load
     await _cleanupIncognitoSessions();
@@ -1410,9 +1526,9 @@ export async function loadSessions() {
       }
     }
 
-    if (targetId && targetId !== currentSessionId) {
+    if (!skipAutoSelect && targetId && targetId !== currentSessionId) {
       await selectSession(targetId, { keepSidebar: true });
-    } else if (targetId && targetId === currentSessionId) {
+    } else if (!skipAutoSelect && targetId && targetId === currentSessionId) {
       // Same session — just refresh the header name in case it was auto-generated
       const s = sessions.find(x => x.id === targetId);
       const metaEl = document.getElementById('current-meta');
@@ -1420,7 +1536,7 @@ export async function loadSessions() {
     }
 
     // No session selected — still enable input so slash commands (e.g. /setup) work
-    if (!targetId && !hasPendingChat) {
+    if (!skipAutoSelect && !targetId && !hasPendingChat) {
       const msgInput = document.getElementById('message');
       if (msgInput) {
         msgInput.disabled = false;
@@ -1646,6 +1762,8 @@ export async function selectSession(id, { keepSidebar = false } = {}) {
     if (window.chatModule && window.chatModule.checkPendingResearch) {
       window.chatModule.checkPendingResearch(id);
     }
+    // Workspace-bound sessions: force Agent mode + show project banner
+    _syncWorkspaceChatContext(meta);
     // Restore group chat state if this is a group session
     if (window.groupModule && window.groupModule.restoreState && window.groupModule.restoreState(id)) {
       if (window._syncGroupIndicator) window._syncGroupIndicator(true);
@@ -1726,6 +1844,8 @@ export function createDirectChat(url, modelId, endpointId) {
     try { window.groupModule.stopGroup(); } catch {}
     if (window._syncGroupIndicator) window._syncGroupIndicator(false);
   }
+
+  _clearWorkspaceChatContext();
 
   // Don't hit the API — just store the model info and prepare the UI
   _pendingChat = { url, modelId, endpointId };
@@ -1833,6 +1953,10 @@ export async function materializePendingSession() {
 export function hasPendingChat() { return !!_pendingChat; }
 export function getPendingChat() { return _pendingChat; }
 // Getters for external access
+export function getCurrentSessionMeta() {
+  return sessions.find(s => s.id === currentSessionId) || null;
+}
+
 export function getCurrentSessionId() {
   return currentSessionId;
 }

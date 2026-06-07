@@ -445,6 +445,7 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   if (host) { payload.remote_host = host; const _sp = _getPort(host); if (_sp) payload.ssh_port = _sp; }
   if (isWin) payload.platform = 'windows';
   else if (platform) payload.platform = platform;
+  if (isWin) payload.disable_hf_transfer = true;
   // If this server has a directory flagged as the download target, send it so
   // the backend downloads into <dir>/<model> instead of the default HF cache.
   if (srv.downloadDir) payload.local_dir = srv.downloadDir;

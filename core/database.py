@@ -108,6 +108,7 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+    workspace_project_id = Column(String, ForeignKey("workspace_projects.id", ondelete="SET NULL"), nullable=True, index=True)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -136,6 +137,7 @@ class Session(TimestampMixin, Base):
             'total_input_tokens': self.total_input_tokens or 0,
             'total_output_tokens': self.total_output_tokens or 0,
             'crew_member_id': self.crew_member_id,
+            'workspace_project_id': self.workspace_project_id,
         }
 
 class ChatMessage(Base):
@@ -488,6 +490,104 @@ class CrewMember(TimestampMixin, Base):
 
     session = relationship("Session", foreign_keys=[session_id],
                            backref=backref("crew_member", uselist=False))
+
+
+class WorkspaceProject(TimestampMixin, Base):
+    """Sandboxed on-disk project for the Agent Workspace."""
+    __tablename__ = "workspace_projects"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    name = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    root_path = Column(String, nullable=False)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True)
+    plan_json = Column(Text, nullable=True)  # multi-phase orchestration plan (Phase 4)
+
+    session = relationship("Session", foreign_keys=[session_id],
+                           backref=backref("workspace_project", uselist=False))
+
+    __table_args__ = (
+        Index("ix_workspace_projects_owner_slug", "owner", "slug", unique=True),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "owner": self.owner,
+            "name": self.name,
+            "slug": self.slug,
+            "root_path": self.root_path,
+            "session_id": self.session_id,
+            "plan_json": self.plan_json,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class WorkspaceChange(TimestampMixin, Base):
+    """Pending or applied file/command change awaiting user approval."""
+    __tablename__ = "workspace_changes"
+
+    id = Column(String, primary_key=True, index=True)
+    project_id = Column(String, ForeignKey("workspace_projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String, nullable=True, index=True)
+    status = Column(String, nullable=False, default="pending")  # pending|approved|rejected|applied
+    action_type = Column(String, nullable=False)  # create|modify|delete|run
+    path = Column(String, nullable=True)
+    summary = Column(String, nullable=True)
+    diff_preview = Column(Text, nullable=True)
+    payload = Column(JSON, default=dict)
+    rejection_reason = Column(Text, nullable=True)
+    test_summary = Column(Text, nullable=True)  # PASS/FAIL parse (Phase 2)
+
+    project = relationship("WorkspaceProject", backref=backref("changes", cascade="all, delete-orphan"))
+
+    __table_args__ = (
+        Index("ix_workspace_changes_project_status", "project_id", "status"),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "session_id": self.session_id,
+            "status": self.status,
+            "action_type": self.action_type,
+            "path": self.path,
+            "summary": self.summary,
+            "diff_preview": self.diff_preview,
+            "payload": self.payload or {},
+            "rejection_reason": self.rejection_reason,
+            "test_summary": self.test_summary,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class WorkspaceActivity(TimestampMixin, Base):
+    """Activity log for workspace terminal output and events (Phase 2)."""
+    __tablename__ = "workspace_activity"
+
+    id = Column(String, primary_key=True, index=True)
+    project_id = Column(String, ForeignKey("workspace_projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    session_id = Column(String, nullable=True)
+    kind = Column(String, nullable=False, default="log")  # log|command|test|browser
+    message = Column(Text, nullable=True)
+    meta = Column(JSON, default=dict)
+
+    project = relationship("WorkspaceProject", backref=backref("activity", cascade="all, delete-orphan"))
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "project_id": self.project_id,
+            "session_id": self.session_id,
+            "kind": self.kind,
+            "message": self.message,
+            "meta": self.meta or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 class ScheduledTask(TimestampMixin, Base):
@@ -1328,6 +1428,19 @@ def _migrate_add_assistant_columns():
         logging.getLogger(__name__).warning(f"assistant columns migration: {e}")
 
 
+def _migrate_add_workspace_session_column():
+    """Add workspace_project_id to sessions if missing."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))]
+            if "workspace_project_id" not in cols:
+                conn.execute(text("ALTER TABLE sessions ADD COLUMN workspace_project_id TEXT"))
+                conn.commit()
+                logging.getLogger(__name__).info("Added workspace_project_id column to sessions")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"workspace_project_id migration: {e}")
+
+
 
 
 
@@ -1517,6 +1630,7 @@ def init_db():
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
     _migrate_add_assistant_columns()
+    _migrate_add_workspace_session_column()
     _migrate_seed_email_account()
     _migrate_add_calendar_metadata()
     _migrate_add_calendar_is_utc()

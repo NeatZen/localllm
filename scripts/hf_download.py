@@ -20,6 +20,16 @@ _last_print = {}
 class PipeTqdm:
     """Minimal tqdm replacement that prints simple progress lines to stdout."""
 
+    _lock = None
+
+    @classmethod
+    def set_lock(cls, lock):
+        cls._lock = lock
+
+    @classmethod
+    def get_lock(cls):
+        return cls._lock
+
     def __init__(self, *args, **kwargs):
         self.iterable = args[0] if args else kwargs.get("iterable")
         self.total = kwargs.get("total", None)
@@ -126,9 +136,12 @@ def _patch_tqdm():
     """Replace tqdm everywhere with our pipe-friendly version."""
     import tqdm as tqdm_mod
 
-    # Replace the main class
     tqdm_mod.tqdm = PipeTqdm
-    tqdm_mod.auto.tqdm = PipeTqdm
+    try:
+        import tqdm.auto
+        tqdm.auto.tqdm = PipeTqdm
+    except (ImportError, AttributeError):
+        pass
 
     # huggingface_hub uses tqdm.auto or its own utils.tqdm
     try:
@@ -145,18 +158,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_id", help="HuggingFace repo (e.g. meta-llama/Llama-3-8B)")
     parser.add_argument("--include", help="File pattern to include (e.g. '*Q4_K_M*')")
+    parser.add_argument("--local-dir", help="Download into this directory instead of HF cache")
     args = parser.parse_args()
 
     # Disable HF progress bars (we provide our own)
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 
-    # Enable Rust-backed parallel downloader if available — big throughput win.
-    # Must be set before importing huggingface_hub.
-    try:
-        import hf_transfer  # noqa: F401
-        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-    except ImportError:
-        print("HINT pip install hf_transfer for faster downloads", flush=True)
+    # hf_transfer is flaky on Windows (deprecated env var, cache lock hangs).
+    # Respect an explicit env override; otherwise keep it off on Windows.
+    if sys.platform == "win32":
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+        os.environ.setdefault("HF_HUB_DOWNLOAD_MAX_WORKERS", "2")
+    elif os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "0") == "1":
+        try:
+            import hf_transfer  # noqa: F401
+        except ImportError:
+            print("HINT pip install hf_transfer for faster downloads", flush=True)
+            os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 
     _patch_tqdm()
 
@@ -168,6 +186,8 @@ def main():
     }
     if args.include:
         kwargs["allow_patterns"] = [args.include]
+    if args.local_dir:
+        kwargs["local_dir"] = os.path.expanduser(args.local_dir)
 
     print(f"START {args.repo_id}", flush=True)
     try:

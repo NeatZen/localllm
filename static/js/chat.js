@@ -731,12 +731,20 @@ import createResearchSynapse from './researchSynapse.js';
       // Web toggle: pre-search in Chat mode, tool permission in Agent mode
       const toggleState = Storage.loadToggleState();
       let isAgentMode = (toggleState.mode || 'chat') === 'agent';
+      const wsMeta = sessionModule.getCurrentSessionMeta?.();
+      const isWorkspaceChat = !!(window._activeWorkspaceProjectId || wsMeta?.workspace_project_id);
+      if (isWorkspaceChat) {
+        isAgentMode = true;
+      }
       // Auto-escalate to agent mode when a document is open — the user expects
       // the AI to see the document and have tools to edit it
-      if (!isAgentMode && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
+      if (!isAgentMode && !isWorkspaceChat && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
         isAgentMode = true;
       }
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
+      if (isWorkspaceChat) {
+        fd.append('allow_bash', 'true');
+      }
       if (el('web-toggle').checked) {
         if (isAgentMode) {
           fd.append('allow_web_search', 'true');
@@ -744,7 +752,7 @@ import createResearchSynapse from './researchSynapse.js';
           fd.append('use_web', 'true');
         }
       }
-      if (el('research-toggle').checked) {
+      if (el('research-toggle').checked && !isWorkspaceChat) {
         fd.append('use_research', 'true');
         // Research always runs in chat mode — override agent if set
         fd.set('mode', 'chat');
@@ -930,8 +938,9 @@ import createResearchSynapse from './researchSynapse.js';
           if (m) errText = m[1].replace(/\\"/g, '"');
           else if (errBody.length < 200) errText = errBody;
         } catch {}
-        // Auto-switch to chat mode for tool-related errors
-        if (errText.includes('tool') || errText.includes('auto')) {
+        // Auto-switch to chat mode for tool-related errors (not in workspace builds)
+        const _wsErr = !!(window._activeWorkspaceProjectId || sessionModule.getCurrentSessionMeta?.()?.workspace_project_id);
+        if ((errText.includes('tool') || errText.includes('auto')) && !_wsErr) {
           errText = 'This model doesn\'t support agent tools — switched to Chat mode. Try again.';
           const _ab = document.getElementById('mode-agent-btn');
           const _cb = document.getElementById('mode-chat-btn');

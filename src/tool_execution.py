@@ -254,11 +254,12 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    session_id: Optional[str] = None,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
-        return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
+        return await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
 
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
@@ -267,7 +268,7 @@ async def _call_mcp_tool(
 
     # If MCP server not connected, try direct fallback
     if isinstance(result, dict) and result.get("exit_code") == 1 and "not connected" in result.get("error", ""):
-        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id)
         if fallback:
             return fallback
 
@@ -294,6 +295,7 @@ async def _direct_fallback(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[Dict]:
     """In-process execution path for the eight tools that used to live as
     stdio MCP servers under mcp_servers/. Those servers were deleted in
@@ -321,8 +323,22 @@ async def _direct_fallback(
         "LINES": "40",
     }
 
+    ws_ctx = None
+    if session_id:
+        try:
+            from src.workspace_service import get_workspace_context
+            ws_ctx = get_workspace_context(session_id)
+            if ws_ctx:
+                _subproc_env["ODYSSEUS_WORKSPACE"] = str(ws_ctx.root_path)
+        except Exception:
+            ws_ctx = None
+
     try:
         if tool == "bash":
+            if ws_ctx:
+                from src.workspace_service import intercept_bash
+                _, result = intercept_bash(ws_ctx, content)
+                return result
             proc = await asyncio.create_subprocess_shell(
                 content,
                 stdout=asyncio.subprocess.PIPE,
@@ -344,6 +360,11 @@ async def _direct_fallback(
             return {"output": output or "(no output)", "exit_code": rc or 0}
 
         if tool == "python":
+            if ws_ctx:
+                from src.workspace_service import intercept_bash
+                wrapped = f'python3 -I -c {repr(content)}'
+                _, result = intercept_bash(ws_ctx, wrapped)
+                return result
             # Run user code in a subprocess so an infinite loop or crash
             # can't take the whole server down. -I = isolated mode (skip
             # user site, no PYTHONPATH inheritance) for hygiene.
@@ -372,11 +393,16 @@ async def _direct_fallback(
             if not path:
                 return {"error": "read_file: path required", "exit_code": 1}
             try:
-                # Run blocking read in a thread to keep the loop responsive
                 def _read():
+                    if ws_ctx:
+                        from src.workspace_sandbox import resolve_workspace_path, read_text_file
+                        abs_path = resolve_workspace_path(ws_ctx, path)
+                        return read_text_file(abs_path, MAX_READ_CHARS + 1)
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
                         return f.read(MAX_READ_CHARS + 1)
                 data = await asyncio.to_thread(_read)
+            except ValueError as e:
+                return {"error": f"read_file: {e}", "exit_code": 1}
             except FileNotFoundError:
                 return {"error": f"read_file: {path}: not found", "exit_code": 1}
             except PermissionError:
@@ -394,6 +420,10 @@ async def _direct_fallback(
             body = lines[1] if len(lines) > 1 else ""
             if not path:
                 return {"error": "write_file: path required", "exit_code": 1}
+            if ws_ctx:
+                from src.workspace_service import intercept_write_file
+                _, result = intercept_write_file(ws_ctx, path, body)
+                return result
             try:
                 def _write():
                     import os
@@ -589,7 +619,44 @@ async def execute_tool_block(
     if tool in _MCP_TOOL_MAP:
         first_line = content.split(chr(10))[0][:80]
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb, session_id=session_id)
+    elif tool in ("list_workspace_files", "propose_file_change", "propose_command", "create_workspace_plan"):
+        import json as _json
+        from src.workspace_service import (
+            get_workspace_context,
+            do_list_workspace_files,
+            do_propose_file_change,
+            do_propose_command,
+            do_create_workspace_plan,
+        )
+        ws_ctx = get_workspace_context(session_id) if session_id else None
+        if not ws_ctx:
+            desc = f"{tool}: no workspace"
+            result = {"error": "This tool requires an Agent Workspace project session.", "exit_code": 1}
+        elif tool == "list_workspace_files":
+            desc = "list_workspace_files"
+            try:
+                result = do_list_workspace_files(ws_ctx, content.strip())
+            except ValueError as e:
+                result = {"error": str(e), "exit_code": 1}
+        elif tool == "propose_file_change":
+            desc = "propose_file_change"
+            try:
+                result = do_propose_file_change(ws_ctx, content)
+            except (_json.JSONDecodeError, ValueError) as e:
+                result = {"error": str(e), "exit_code": 1}
+        elif tool == "propose_command":
+            desc = "propose_command"
+            try:
+                result = do_propose_command(ws_ctx, content)
+            except ValueError as e:
+                result = {"error": str(e), "exit_code": 1}
+        else:
+            desc = "create_workspace_plan"
+            try:
+                result = do_create_workspace_plan(ws_ctx, content)
+            except _json.JSONDecodeError as e:
+                result = {"error": str(e), "exit_code": 1}
     elif tool == "create_document":
         title = content.split("\n")[0].strip()[:60]
         desc = f"create_document: {title}"

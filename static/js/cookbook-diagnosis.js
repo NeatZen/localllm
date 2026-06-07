@@ -40,6 +40,18 @@ function _inferBaseRepo(text) {
 
 export const ERROR_PATTERNS = [
   {
+    pattern: /requires a newer version of Ollama|pull model manifest:\s*412/i,
+    message: 'Your Ollama app is too old for this model. Update Ollama, quit the tray app fully, then retry the pull.',
+    fixes: [
+      { label: 'Open ollama.com/download', action: () => window.open('https://ollama.com/download', '_blank') },
+    ],
+  },
+  {
+    pattern: /pull model manifest: file does not exist/i,
+    message: 'That Ollama tag does not exist. Use a valid tag from the model page (e.g. qwen3.5:27b, not a MoE active-params size).',
+    fixes: [],
+  },
+  {
     pattern: /No available memory for the cache blocks|Available KV cache memory:.*-/i,
     message: 'No GPU memory left for KV cache after loading model.',
     fixes: [

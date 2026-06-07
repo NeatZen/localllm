@@ -12,7 +12,8 @@ A self-hosted AI workspace -- meant to be the self-hosted version of the UI expe
 ## Features
   - **Chat** -- chat with any local model or API; adding them is super simple.<br>　<sub>vLLM · llama.cpp · Ollama · OpenRouter · OpenAI</sub>
   - **Agent** -- hand it tools and let it run the whole task itself.<br>　<sub>built on [opencode](https://github.com/anomalyco/opencode) · MCP · web · files · shell · skills · memory</sub>
-  - **Cookbook** -- Scans your hardware, recommends models, click to download and serve.. easy!<br>　<sub>built on [llmfit](https://github.com/AlexsJones/llmfit) · VRAM-aware · GGUF / FP8 / AWQ · fit scoring · vLLM / llama.cpp serving</sub>
+  - **Cookbook** -- Scans your hardware, recommends models, click to download and serve.. easy!<br>　<sub>built on [llmfit](https://github.com/AlexsJones/llmfit) · VRAM-aware · GGUF / FP8 / AWQ · fit scoring · vLLM / llama.cpp serving · Ollama library search + one-click pull · hardware-fit ranking</sub>
+  - **Agent Workspace** -- Give the agent a sandboxed project folder: propose file edits and commands, approve or reject changes, bind sessions to projects.<br>　<sub>project tree · pending approvals · build/test shortcuts · localhost browser testing</sub>
   - **Deep Research** -- multi-step runs that gather, read, and synthesize sources into a nice visual report.<br>　<sub>adapted from [Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)</sub>
   - **Compare** -- a fun tool to compare models side by side. Test completely blind, no bias!<br>　<sub>multi-model · blind test · synthesis</sub>
   - **Documents** -- YOU write the text, AI is there to assist, not the opposite.<br>　<sub>multi-tab editor · markdown · HTML · CSV · syntax highlighting · AI edits · suggestions</sub>
@@ -110,7 +111,24 @@ python setup.py            # creates data dirs and prints an initial admin passw
 uvicorn app:app --host 0.0.0.0 --port 7000
 ```
 
-### Option 3: Manual install — Windows (PowerShell)
+### Option 3: Windows native (no Docker)
+**Turnkey (recommended on Windows):** bundled local AI (Qwen2.5 3B via llama.cpp), GPU-aware install, and a double-click launcher.
+
+```powershell
+git clone <your-odysseus-repo-url>
+cd odysseus
+.\install-turnkey.ps1          # one-time: venv, deps, ~2 GB model download
+```
+
+After setup, double-click **`Start Odysseus.bat`** or run:
+
+```powershell
+.\run-phone.ps1               # binds 0.0.0.0, prints a LAN URL for phones on the same Wi-Fi
+.\run-phone.ps1 -OpenBrowser  # also opens http://localhost:7000
+```
+
+**Manual install** (same as Linux, without the bundled model):
+
 ```powershell
 git clone <your-odysseus-repo-url>
 cd odysseus
@@ -118,11 +136,21 @@ python -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python setup.py
-uvicorn app:app --host 0.0.0.0 --port 7000
+uvicorn app:app --host 127.0.0.1 --port 7000
 ```
 
 Open `http://localhost:7000`, log in with the generated admin password,
 and configure everything else inside **Settings**.
+
+**Cookbook on Windows:** connect **Ollama** at `http://localhost:11434/v1` (Ollama **0.30+** required for recent models). The Download tab searches the Ollama library, ranks models for your GPU, and pulls with one click. The Serve tab lists Hugging Face cache **and** local Ollama models.
+
+**Port 7000 already in use:** close other Odysseus windows first. If restarts left orphan listeners behind, stop stale Python workers:
+
+```powershell
+Get-NetTCPConnection -LocalPort 7000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
+```
+
+Avoid `--reload` on Windows for long-running sessions; repeated reload restarts can stack workers on the same port.
 
 ## Security Notes
 Odysseus is a self-hosted workspace with powerful local tools: shell access, file uploads, model downloads, web research, email/calendar integrations, and API tokens. Treat it like an admin console.
@@ -188,8 +216,9 @@ Docker Compose includes these by default:
 app.py                   # FastAPI entry point
 core/      auth, database, middleware, constants
 src/       llm_core, agent_loop, agent_tools, chat_processor, search/
-routes/    chat, session, document, memory, model … endpoints
-services/  docs, memory, search, hwfit (Cookbook) …
+routes/    chat, session, document, memory, model, workspace … endpoints
+services/  docs, memory, search, hwfit (Cookbook), ollama_library …
+src/       workspace_sandbox, workspace_service (Agent Workspace)
 static/    index.html + app.js + style.css + js/ (modular front-end)
 docs/      landing page (index.html) + preview clips
 ```

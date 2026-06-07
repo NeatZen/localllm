@@ -77,6 +77,7 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/shell/stream",    # SSE
     "/api/research",        # multi-minute jobs
     "/api/model/download",  # tmux setup may run pip installs
+    "/api/model/serve",     # spawns background serve process; model load exceeds 45s
     "/api/model/probe",     # SSE; iterates models with up to 8s timeout each
     "/api/model-endpoints", # /probe sub-route also iterates models
     "/api/cookbook/setup",  # remote pacman/apt installs
@@ -192,6 +193,14 @@ if AUTH_ENABLED:
             if LOCALHOST_BYPASS:
                 client_host = request.client.host if request.client else None
                 if client_host in ("127.0.0.1", "::1"):
+                    # Still attach the session user when a valid cookie is
+                    # present. Without this, /api/auth/status sees the cookie
+                    # (exempt route) but get_current_user() stays empty and
+                    # strict routes 401 — the UI ping-pongs / ↔ /login.
+                    token = request.cookies.get(SESSION_COOKIE)
+                    if token and auth_manager.validate_token(token):
+                        request.state.current_user = auth_manager.get_username_for_token(token)
+                        request.state.api_token = False
                     return await call_next(request)
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
@@ -546,6 +555,10 @@ app.include_router(setup_shell_routes())
 # Cookbook (model download/serve/cache, cookbook state sync)
 from routes.cookbook_routes import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
+
+# Agent Workspace (sandboxed projects, approval queue)
+from routes.workspace_routes import setup_workspace_routes
+app.include_router(setup_workspace_routes())
 
 # Hardware model fitting (cookbook "What Fits?" tab)
 from routes.hwfit_routes import setup_hwfit_routes

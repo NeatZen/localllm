@@ -292,6 +292,7 @@ function _scanSig() {
     o: sortEl?.value || 'score',
     r: sortEl?.dataset.reverse === '1' ? 1 : 0,
     q: document.getElementById('hwfit-quant')?.value || '',
+    a: document.getElementById('hwfit-agent-only')?.checked ? 1 : 0,
     g: (tc && typeof tc._activeCount === 'number') ? String(tc._activeCount) : '',
     gg: (tc && tc._activeGroup) ? String(tc._activeGroup) : '',
     m: _manualHwParams(),
@@ -440,6 +441,7 @@ export async function _hwfitFetch(fresh = false) {
     if (!isImageMode) {
       if (useCase) params.set('use_case', useCase);
       if (quantPref) params.set('quant', quantPref);
+      if (document.getElementById('hwfit-agent-only')?.checked) params.set('agent_only', 'true');
     }
     const endpoint = isImageMode ? `/api/hwfit/image-models?${params}` : `/api/hwfit/models?${params}`;
     const res = await fetch(endpoint);
@@ -703,8 +705,20 @@ export const _hwfitColumns = [
   { key: 'context',label: 'Ctx',   cls: 'hwfit-c-ctx' },
   { key: 'speed', label: 'Speed',  cls: 'hwfit-c-speed' },
   { key: 'score', label: 'Score',  cls: 'hwfit-c-score' },
+  { key: null,    label: 'Agent',  cls: 'hwfit-c-agent' },
   { key: null,    label: 'Mode',   cls: 'hwfit-c-mode' },
 ];
+
+function _agentBadgeHtml(m) {
+  if (m.is_image_gen) return '<span class="hwfit-agent-no" title="Image model">—</span>';
+  if (m.agent_capable) {
+    const tip = m.agent_capable_label === 'native'
+      ? 'Agent tools supported (catalog tool_use)'
+      : 'Likely agent-capable (name/architecture match — use vLLM/Ollama/API for best results)';
+    return `<span class="hwfit-badge hwfit-agent" title="${esc(tip)}">✓</span>`;
+  }
+  return '<span class="hwfit-agent-no" title="Chat-only — weak or no tool use in Agent mode">—</span>';
+}
 
 export function _hwfitRenderList(el, models) {
   if (!el) return;
@@ -716,7 +730,8 @@ export function _hwfitRenderList(el, models) {
     const hasHw = sys && ((sys.gpu_vram_gb || 0) > 0 || (sys.total_ram_gb || 0) > 8);
     const hasFilters = !!(document.getElementById('hwfit-search')?.value?.trim()
       || document.getElementById('hwfit-usecase')?.value
-      || document.getElementById('hwfit-quant')?.value);
+      || document.getElementById('hwfit-quant')?.value
+      || document.getElementById('hwfit-agent-only')?.checked);
     let msg;
     if (hasFilters) msg = 'No models match these filters — try clearing the search, use-case, or quant.';
     else if (hasHw) msg = 'No models fit — the hardware probe may have under-reported. Try Rescan.';
@@ -764,6 +779,7 @@ export function _hwfitRenderList(el, models) {
     html += `<span class="hwfit-col hwfit-c-ctx">${m.is_image_gen ? '\u2014' : ctx}</span>`;
     html += `<span class="hwfit-col hwfit-c-speed">${m.is_image_gen ? '\u2014' : tps + ' t/s'}</span>`;
     html += `<span class="hwfit-col hwfit-c-score">${score}</span>`;
+    html += `<span class="hwfit-col hwfit-c-agent">${_agentBadgeHtml(m)}</span>`;
     html += `<span class="hwfit-col hwfit-c-mode">${m.is_image_gen ? 'image' : esc(modeLabel)}</span>`;
     html += `</div>`;
   }
@@ -853,6 +869,14 @@ export function _expandModelRow(row, modelData) {
   html += `<div class="hwfit-panel-header">`;
   html += `<span class="hwfit-panel-model">${esc(modelData.name)}${modelData.quant_repo ? ` <span style="opacity:0.5;font-size:10px;">(${esc(modelData.quant)})</span>` : ''}</span>`;
   html += `<span class="hwfit-panel-badge">${esc(label)}</span>`;
+  if (!modelData.is_image_gen) {
+    const agentNote = modelData.agent_capable
+      ? (modelData.agent_capable_label === 'native'
+        ? 'Agent: tool-capable (catalog)'
+        : 'Agent: likely tool-capable — serve via vLLM or Ollama for native tools')
+      : 'Agent: chat-only — not recommended for Agent Workspace';
+    html += `<span class="hwfit-panel-agent-note">${esc(agentNote)}</span>`;
+  }
   html += `<a href="${esc(hfUrl)}" target="_blank" rel="noopener" class="hwfit-panel-hf-link" title="View on HuggingFace">HF \u2197</a>`;
   html += `</div>`;
   html += `<div class="hwfit-panel-actions">`;
@@ -1038,10 +1062,12 @@ export function _hwfitInit() {
   const sort = document.getElementById('hwfit-sort');
   const qpref = document.getElementById('hwfit-quant');
   const search = document.getElementById('hwfit-search');
+  const agentOnly = document.getElementById('hwfit-agent-only');
   const remote = document.getElementById('hwfit-host');
   if (uc) uc.addEventListener('change', () => _hwfitFetch());
   if (sort) sort.addEventListener('change', () => _hwfitFetch());
   if (qpref) qpref.addEventListener('change', () => _hwfitFetch());
+  if (agentOnly) agentOnly.addEventListener('change', () => _hwfitFetch());
   // Rescan — force a fresh hardware probe (bypasses the per-host cache).
   const rescan = document.getElementById('hwfit-rescan');
   if (rescan && !rescan.dataset.bound) {

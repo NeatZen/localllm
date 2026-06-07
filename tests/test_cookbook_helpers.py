@@ -1,7 +1,10 @@
+import sys
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
 
-from routes.cookbook_helpers import _safe_env_prefix, _validate_gpus, _validate_ssh_port
+from routes.cookbook_helpers import _safe_env_prefix, _validate_gpus, _validate_ssh_port, windows_powershell_exe
 
 
 def test_safe_env_prefix_accepts_quoted_venv_path():
@@ -38,3 +41,10 @@ def test_validate_gpus_accepts_indexes_only():
     assert _validate_gpus("0,1,2") == "0,1,2"
     with pytest.raises(HTTPException):
         _validate_gpus("0; rm -rf /")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_windows_powershell_exe_resolves_full_path():
+    exe = windows_powershell_exe()
+    assert exe.lower().endswith((".exe", "powershell"))
+    assert Path(exe).is_file()

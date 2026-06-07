@@ -24,10 +24,12 @@ logger = logging.getLogger(__name__)
 
 from routes.cookbook_helpers import (
     _SSH_PORT_RE, _REMOTE_HOST_RE, _SESSION_ID_RE,
-    _validate_repo_id, _validate_include, _validate_remote_host, _validate_token,
+    _validate_repo_id, _validate_ollama_model, _validate_include, _validate_remote_host, _validate_token,
+    OLLAMA_MIN_RECOMMENDED, get_local_ollama_version, ollama_version_outdated, ollama_pull_ps_block,
+    _run_python_script, _run_shell_command, list_local_ollama_models,
     _validate_local_dir, _validate_ssh_port, _validate_gpus, _shell_path,
     _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
-    _safe_env_prefix,
+    _safe_env_prefix, windows_powershell_exe,
     ModelDownloadRequest, ServeRequest,
 )
 
@@ -259,7 +261,7 @@ def setup_cookbook_routes() -> APIRouter:
             logger.warning("Failed to register cookbook task %s: %s", session_id, exc)
 
     def _download_task_payload(req: ModelDownloadRequest) -> dict:
-        payload: dict = {"repo_id": req.repo_id}
+        payload: dict = {"repo_id": req.repo_id, "source": (req.source or "hf").lower()}
         if req.include:
             payload["include"] = req.include
         if req.local_dir:
@@ -267,6 +269,24 @@ def setup_cookbook_routes() -> APIRouter:
         if req.disable_hf_transfer:
             payload["disable_hf_transfer"] = True
         return payload
+
+    def _download_log_completed(full_snapshot: str) -> bool:
+        if not full_snapshot:
+            return False
+        if "DOWNLOAD_OK" in full_snapshot:
+            return True
+        if "DOWNLOAD_FAILED" in full_snapshot:
+            return False
+        if re.search(r"\bDONE\s+\S", full_snapshot):
+            return True
+        if re.search(r"\bDONE\b", full_snapshot) and "/snapshots/" in full_snapshot:
+            return True
+        if re.search(r"100%\|", full_snapshot) or re.search(r"100%\s+\d+/\d+", full_snapshot):
+            return True
+        # Ollama pull prints a final "success" line when complete.
+        if re.search(r"(?m)^success\s*$", full_snapshot, re.I):
+            return True
+        return False
 
     def _local_session_dir() -> Path:
         return Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
@@ -302,7 +322,7 @@ def setup_cookbook_routes() -> APIRouter:
             try:
                 r = _sp.run(
                     [
-                        "powershell",
+                        windows_powershell_exe(),
                         "-NoProfile",
                         "-Command",
                         f"Get-Process -Id {pid} -ErrorAction SilentlyContinue | Out-Null; if ($?) {{ exit 0 }} else {{ exit 1 }}",
@@ -318,6 +338,65 @@ def setup_cookbook_routes() -> APIRouter:
             return True
         except OSError:
             return False
+
+    def _spawn_detached_local_ps1(
+        runner_ps: Path,
+        session_id: str,
+        session_dir: Path | None = None,
+    ) -> tuple[int | None, str | None]:
+        """Launch a PowerShell runner detached so the HTTP handler returns immediately.
+
+        Use Start-Process with -RedirectStandardOutput/-RedirectStandardError so the
+        child keeps writing to log files after this function returns. Passing open
+        file handles to Popen and closing them in a ``with`` block leaves 0-byte logs
+        on Windows, which the UI reads as an instant crash.
+        """
+        import subprocess as _sp
+
+        sd = session_dir or _local_session_dir()
+        sd.mkdir(parents=True, exist_ok=True)
+        log_path = sd / f"{session_id}.log"
+        err_path = sd / f"{session_id}.err.log"
+        pid_path = sd / f"{session_id}.pid"
+        try:
+            ps_exe = windows_powershell_exe()
+            create_flags = 0x08000000  # CREATE_NO_WINDOW
+            log_path.write_bytes(b"")
+            err_path.write_bytes(b"")
+
+            rps = _ps_squote(str(runner_ps))
+            lps = _ps_squote(str(log_path))
+            eps = _ps_squote(str(err_path))
+            pps = _ps_squote(str(pid_path))
+            pes = _ps_squote(ps_exe)
+
+            launch_cmd = (
+                f"$p = Start-Process -FilePath '{pes}' "
+                f"-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{rps}') "
+                f"-RedirectStandardOutput '{lps}' -RedirectStandardError '{eps}' "
+                f"-WindowStyle Hidden -PassThru; "
+                f"if ($p) {{ Set-Content -Path '{pps}' -Value $p.Id -Encoding Ascii -NoNewline }}"
+            )
+            r = _sp.run(
+                [ps_exe, "-NoProfile", "-Command", launch_cmd],
+                stdin=_sp.DEVNULL,
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+                creationflags=create_flags,
+                timeout=30,
+            )
+            if r.returncode != 0 or not pid_path.exists():
+                err_hint = ""
+                if err_path.exists() and err_path.stat().st_size:
+                    err_hint = err_path.read_text(encoding="utf-8", errors="replace")[:240]
+                return None, err_hint or "Failed to start download process"
+            pid = _read_pid_file(pid_path)
+            if pid is None:
+                return None, "Failed to read download process PID"
+            return pid, None
+        except Exception as exc:
+            logger.exception("Detached Windows launch failed for %s", session_id)
+            return None, str(exc)
 
     def _task_process_alive(task: dict) -> bool:
         import subprocess as _sp
@@ -361,27 +440,9 @@ def setup_cookbook_routes() -> APIRouter:
             return False
 
     def _read_local_session_logs(session_id: str, tail: int = 20) -> str:
-        import subprocess as _sp
-
         sd = _local_session_dir()
         log_file = sd / f"{session_id}.log"
         err_file = sd / f"{session_id}.err.log"
-        try:
-            r = _sp.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    f"Get-Content '{log_file}','{err_file}' -ErrorAction SilentlyContinue | Select-Object -Last {tail}",
-                ],
-                timeout=10,
-                capture_output=True,
-                text=True,
-            )
-            if r.returncode == 0:
-                return (r.stdout or "").strip()
-        except Exception:
-            pass
         chunks = []
         for path in (log_file, err_file):
             if path.exists():
@@ -413,17 +474,18 @@ def setup_cookbook_routes() -> APIRouter:
             repo = ""
             m = re.search(r"Downloading\s+(\S+)", full_snapshot)
             if m:
-                repo = m.group(1)
+                repo = m.group(1).rstrip(".")
                 model = repo.split("/")[-1] if "/" in repo else repo
             lines = [l.strip() for l in full_snapshot.splitlines() if l.strip()]
             downloading_lines = [l for l in lines if l.startswith("Downloading")]
             progress_text = downloading_lines[-1] if downloading_lines else (lines[-1] if lines else "")
             lower = full_snapshot.lower()
-            status = "running"
-            if "DOWNLOAD_OK" in full_snapshot or "100%|" in full_snapshot:
+            if _download_log_completed(full_snapshot):
                 status = "completed"
             elif "failed" in lower or "traceback" in lower:
                 status = "error"
+            else:
+                status = "running"
             orphans.append({
                 "session_id": session_id,
                 "type": "download",
@@ -548,17 +610,183 @@ def setup_cookbook_routes() -> APIRouter:
         Uses `hf download` CLI directly — runs in tmux via `script -qc`
         for real TTY progress, streams ANSI-stripped output via log file."""
         require_admin(request)
+        source = (req.source or "hf").strip().lower()
+        req.remote_host = _validate_remote_host(req.remote_host)
+        req.ssh_port = _validate_ssh_port(req.ssh_port)
+        TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        session_id = f"cookbook-{uuid.uuid4().hex[:8]}"
+        remote = req.remote_host
+        is_windows = req.platform == "windows" or (not remote and sys.platform == "win32")
+
+        if source == "ollama":
+            model_ref = _validate_ollama_model(req.repo_id)
+            if not await _binary_available("ollama", remote, req.ssh_port, windows=is_windows):
+                return {
+                    "ok": False,
+                    "error": "Ollama not found — install from https://ollama.com/download",
+                    "session_id": session_id,
+                }
+            if not is_windows and not remote and not await _binary_available("tmux", None, None):
+                return {
+                    "ok": False,
+                    "error": _missing_binary_message("tmux", "local server"),
+                    "session_id": session_id,
+                }
+            pull_bash = f"ollama pull {_bash_squote(model_ref)} 2>&1"
+            _short = model_ref.split(":")[0].split("/")[-1]
+            ollama_ver_text, ollama_ver_tuple = (
+                await asyncio.to_thread(get_local_ollama_version)
+                if not remote
+                else (None, None)
+            )
+            if not remote and ollama_ver_text and ollama_version_outdated(ollama_ver_tuple):
+                min_s = ".".join(str(x) for x in OLLAMA_MIN_RECOMMENDED)
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Ollama {ollama_ver_text.split()[-1] if ollama_ver_text else 'unknown'} is too old "
+                        f"for most library models (need {min_s}+). "
+                        "Update from https://ollama.com/download, restart Ollama, then retry."
+                    ),
+                    "session_id": session_id,
+                    "ollama_version": ollama_ver_text,
+                    "update_required": True,
+                }
+            logger.info(
+                "Ollama pull: model=%s remote=%s platform=%s",
+                model_ref,
+                remote or "local",
+                req.platform,
+            )
+
+            if is_windows and not remote:
+                session_dir = _local_session_dir()
+                session_dir.mkdir(parents=True, exist_ok=True)
+                runner_ps = TMUX_LOG_DIR / f"{session_id}_run.ps1"
+                ps_lines = [
+                    f'$sessionDir = "{session_dir}"',
+                    'New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null',
+                    'if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {',
+                    '  Write-Host "Ollama not found. Install from https://ollama.com/download/windows"; exit 1',
+                    '}',
+                    f'Write-Host "Pulling {_ps_squote(model_ref)}"',
+                    *ollama_pull_ps_block(model_ref),
+                ]
+                if req.env_prefix:
+                    ps_lines.insert(3, _safe_env_prefix(req.env_prefix))
+                runner_ps.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
+                _pid, spawn_err = await asyncio.to_thread(
+                    _spawn_detached_local_ps1, runner_ps, session_id, session_dir
+                )
+                if spawn_err or not _pid:
+                    return {"ok": False, "error": spawn_err or "Failed to start Ollama pull", "session_id": session_id}
+            elif is_windows and remote:
+                remote_runner = f".{session_id}_run.ps1"
+                ps_lines = [
+                    '$sessionDir = "$env:TEMP\\odysseus-sessions"',
+                    'New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null',
+                    'if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {',
+                    '  Write-Host "Ollama not found. Install from https://ollama.com/download/windows"; exit 1',
+                    '}',
+                ]
+                if req.env_prefix:
+                    ps_lines.append(_safe_env_prefix(req.env_prefix))
+                ps_lines.extend([
+                    f'Write-Host "Pulling {_ps_squote(model_ref)}"',
+                    *ollama_pull_ps_block(model_ref),
+                    f'Remove-Item -Force "$HOME\\{remote_runner}" -ErrorAction SilentlyContinue',
+                ])
+                runner_path = TMUX_LOG_DIR / f"{session_id}_run.ps1"
+                runner_path.write_text("\r\n".join(ps_lines) + "\r\n")
+                _port = req.ssh_port
+                _Pf = f"-P {_port} " if _port and _port != "22" else ""
+                _pf = f"-p {_port} " if _port and _port != "22" else ""
+                launch_ps = (
+                    "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                    f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
+                    f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
+                    f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
+                    f"-WindowStyle Hidden -PassThru | ForEach-Object {{ Set-Content -Path \\\"$sd\\{session_id}.pid\\\" -Value $_.Id -Encoding Ascii -NoNewline }}"
+                )
+                setup_cmd = (
+                    f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
+                    f'ssh {_pf}{remote} "powershell -Command \\"{launch_ps}\\""'
+                )
+                proc = await asyncio.create_subprocess_shell(
+                    setup_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await proc.wait()
+                if proc.returncode != 0:
+                    stderr = (await proc.stderr.read()).decode(errors="replace")
+                    return {"ok": False, "error": stderr, "session_id": session_id}
+            else:
+                wrapper_script = TMUX_LOG_DIR / f"{session_id}.sh"
+                lines = ["#!/bin/bash"]
+                lines.extend(_user_shell_path_bootstrap())
+                lines.append('if ! command -v ollama >/dev/null 2>&1; then echo "Ollama not found — install from https://ollama.com/download"; exit 1; fi')
+                if req.env_prefix:
+                    lines.append(_safe_env_prefix(req.env_prefix))
+                else:
+                    lines.append("deactivate 2>/dev/null; hash -r")
+                lines.append(f'echo "Pulling {model_ref}"')
+                lines.append(pull_bash)
+                lines.append('rc=$?')
+                lines.append('if [ $rc -eq 0 ]; then echo ""; echo "DOWNLOAD_OK"; else echo ""; echo "DOWNLOAD_FAILED (exit $rc)"; fi')
+                lines.append(f"rm -f '{wrapper_script}'")
+                lines.append('exec "${SHELL:-/bin/bash}"')
+                wrapper_script.write_text("\n".join(lines) + "\n")
+                wrapper_script.chmod(0o755)
+                if remote:
+                    remote_runner = f".{session_id}_run.sh"
+                    runner_path = TMUX_LOG_DIR / f"{session_id}_run.sh"
+                    runner_path.write_text("\n".join(lines) + "\n")
+                    _port = req.ssh_port
+                    _Pf = f"-P {_port} " if _port and _port != "22" else ""
+                    _pf = f"-p {_port} " if _port and _port != "22" else ""
+                    setup_cmd = (
+                        f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
+                        f"ssh {_pf}{remote} 'chmod +x {remote_runner} && tmux new-session -d -s {session_id} \"./{remote_runner}\"'"
+                    )
+                else:
+                    setup_cmd = f"tmux new-session -d -s {session_id} {shlex.quote(str(wrapper_script))}"
+                proc = await asyncio.create_subprocess_shell(
+                    setup_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await proc.wait()
+                if proc.returncode != 0:
+                    stderr = (await proc.stderr.read()).decode(errors="replace")
+                    return {"ok": False, "error": stderr, "session_id": session_id}
+
+            try:
+                from src.assistant_log import log_to_assistant
+                from src.auth_helpers import get_current_user
+                owner = get_current_user(request)
+                log_to_assistant(
+                    owner,
+                    f"Started Ollama pull {model_ref} on {remote or 'local'}",
+                    category="Download",
+                )
+            except Exception:
+                pass
+            _register_cookbook_task(
+                session_id,
+                _short,
+                "download",
+                _download_task_payload(req),
+                remote_host=remote or "",
+                ssh_port=req.ssh_port or "",
+                platform="windows" if is_windows else (req.platform or ""),
+            )
+            return {"ok": True, "session_id": session_id, "remote": remote or "local", "source": "ollama"}
+
+        # ── HuggingFace download ──
         # Defence-in-depth: even though this endpoint is admin-gated, refuse
         # values that would land in shell contexts with metacharacters.
         _validate_repo_id(req.repo_id)
         _validate_include(req.include)
-        _validate_remote_host(req.remote_host)
-        req.ssh_port = _validate_ssh_port(req.ssh_port)
         req.local_dir = _validate_local_dir(req.local_dir)
         req.hf_token = req.hf_token or _load_stored_hf_token()
         _validate_token(req.hf_token)
-        TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        session_id = f"cookbook-{uuid.uuid4().hex[:8]}"
         wrapper_script = TMUX_LOG_DIR / f"{session_id}.sh"
 
         # When a download directory is set, target a per-model subfolder under it
@@ -659,7 +887,7 @@ def setup_cookbook_routes() -> APIRouter:
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                 f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                 f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
-                f"-NoNewWindow -PassThru | ForEach-Object {{ Set-Content -Path \\\"$sd\\{session_id}.pid\\\" -Value $_.Id -Encoding Ascii -NoNewline }}"
+                f"-WindowStyle Hidden -PassThru | ForEach-Object {{ Set-Content -Path \\\"$sd\\{session_id}.pid\\\" -Value $_.Id -Encoding Ascii -NoNewline }}"
             )
             setup_cmd = (
                 f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
@@ -727,42 +955,29 @@ def setup_cookbook_routes() -> APIRouter:
             )
         elif is_windows and not remote:
             # Local Windows: detached PowerShell process (no tmux/WSL required).
+            # Use scripts/hf_download.py with hf_transfer OFF — the Rust path is
+            # deprecated on Windows and tends to hang at 0% with cache lock contention.
             session_dir = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
             session_dir.mkdir(parents=True, exist_ok=True)
             py_exe = sys.executable
-            runner_py = TMUX_LOG_DIR / f"{session_id}_run.py"
-            py_lines = [
-                "import os",
-                "import subprocess, sys",
-                "subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'huggingface-hub'], check=False)",
-            ]
-            if not req.disable_hf_transfer:
-                py_lines.append(
-                    "subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'hf_transfer'], check=False)"
-                )
-            if req.hf_token:
-                py_lines.append(f"os.environ['HF_TOKEN'] = {req.hf_token!r}")
-            if req.disable_hf_transfer:
-                py_lines.append("os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'")
-                py_lines.append("os.environ['HF_HUB_DOWNLOAD_MAX_WORKERS'] = '4'")
-            else:
-                py_lines.append("os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'")
-                py_lines.append("os.environ['HF_HUB_DOWNLOAD_MAX_WORKERS'] = '8'")
-            snap_kwargs = [f"repo_id={req.repo_id!r}", "max_workers=8"]
-            if _dl_base:
-                snap_kwargs.append(f"local_dir={_dl_base!r}")
-            if req.include:
-                snap_kwargs.append(f"allow_patterns=[{req.include!r}]")
-            py_lines.append("from huggingface_hub import snapshot_download")
-            py_lines.append(f"snapshot_download({', '.join(snap_kwargs)})")
-            py_lines.append('print("\\nDOWNLOAD_OK")')
-            runner_py.write_text("\n".join(py_lines) + "\n", encoding="utf-8")
+            hf_script = Path(__file__).resolve().parent.parent / "scripts" / "hf_download.py"
 
             runner_ps = TMUX_LOG_DIR / f"{session_id}_run.ps1"
             ps_lines = [
                 f'$sessionDir = "{session_dir}"',
                 'New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null',
+                '$env:HF_HUB_ENABLE_HF_TRANSFER = "0"',
+                '$env:HF_HUB_DOWNLOAD_MAX_WORKERS = "2"',
+                '$env:PYTHONUNBUFFERED = "1"',
+                f'$py = "{py_exe}"',
+                f'$script = "{hf_script}"',
+                f'$repo = \'{_ps_squote(req.repo_id)}\'',
+                '$dlArgs = @("-u", $script, $repo)',
             ]
+            if req.include:
+                ps_lines.append(f"$dlArgs += @('--include', '{_ps_squote(req.include)}')")
+            if _dl_base:
+                ps_lines.append(f"$dlArgs += @('--local-dir', '{_ps_squote(_dl_base)}')")
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
             if req.env_prefix:
@@ -770,8 +985,8 @@ def setup_cookbook_routes() -> APIRouter:
             ps_lines.extend(
                 [
                     'try {',
-                    f'  Write-Host "Downloading {req.repo_id}..."',
-                    f'  & "{py_exe}" "{runner_py}"',
+                    f'  Write-Host "Downloading $repo"',
+                    '  & $py @dlArgs',
                     '  if ($LASTEXITCODE -eq 0) { Write-Host ""; Write-Host "DOWNLOAD_OK" }',
                     '  else { Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)" }',
                     '} catch {',
@@ -781,37 +996,12 @@ def setup_cookbook_routes() -> APIRouter:
             )
             runner_ps.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
 
-            launch_path = TMUX_LOG_DIR / f"{session_id}_launch.ps1"
-            launch_path.write_text(
-                "\r\n".join(
-                    [
-                        f'$sd = "{session_dir}"',
-                        "New-Item -ItemType Directory -Force -Path $sd | Out-Null",
-                        f'$runner = "{runner_ps}"',
-                        f'Start-Process powershell -ArgumentList "-ExecutionPolicy","Bypass","-File",$runner '
-                        f'-RedirectStandardOutput "$sd\\{session_id}.log" '
-                        f'-RedirectStandardError "$sd\\{session_id}.err.log" '
-                        f'-NoNewWindow -PassThru | ForEach-Object {{ Set-Content -Path "$sd\\{session_id}.pid" -Value $_.Id -Encoding Ascii -NoNewline }}',
-                    ]
-                )
-                + "\r\n",
-                encoding="utf-8",
+            _pid, spawn_err = await asyncio.to_thread(
+                _spawn_detached_local_ps1, runner_ps, session_id, session_dir
             )
-            proc = await asyncio.create_subprocess_exec(
-                "powershell",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(launch_path),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
-            if proc.returncode != 0:
-                stderr = (await proc.stderr.read()).decode(errors="replace")
-                logger.error(f"Local Windows download launch failed (rc={proc.returncode}): {stderr}")
-                return {"ok": False, "error": stderr or "Failed to start download", "session_id": session_id}
+            if spawn_err or not _pid:
+                logger.error("Local Windows download launch failed: %s", spawn_err)
+                return {"ok": False, "error": spawn_err or "Failed to start download", "session_id": session_id}
             try:
                 from src.assistant_log import log_to_assistant
                 from src.auth_helpers import get_current_user
@@ -894,6 +1084,21 @@ def setup_cookbook_routes() -> APIRouter:
     async def model_cached(request: Request, host: str | None = None, model_dir: str | None = None, ssh_port: str | None = None, platform: str | None = None):
         """List cached models. Scans HF cache + optional model directory."""
         require_admin(request)
+        try:
+            return await _model_cached_impl(host, model_dir, ssh_port, platform)
+        except asyncio.TimeoutError:
+            logger.warning("model/cached scan timed out")
+            return {"models": [], "host": host or "local", "error": "Cache scan timed out"}
+        except Exception as e:
+            logger.exception("model/cached failed")
+            return {"models": [], "host": host or "local", "error": str(e)}
+
+    async def _model_cached_impl(
+        host: str | None,
+        model_dir: str | None,
+        ssh_port: str | None,
+        platform: str | None,
+    ):
         # Validate shell-bound inputs, matching the sibling list_gpus endpoint —
         # `host`/`ssh_port` are interpolated into an ssh command below, so an
         # unvalidated value (e.g. "x'; rm -rf ~ #") would be command injection.
@@ -917,6 +1122,21 @@ def setup_cookbook_routes() -> APIRouter:
         paths_code += "    for root, dirs, fns in os.walk(top, followlinks=False):\n"
         paths_code += "        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(root, d)) and safe_path(os.path.join(root, d))]\n"
         paths_code += "        yield root, dirs, fns\n"
+        paths_code += "def _best_gguf_in_snap(snap):\n"
+        paths_code += "    if not os.path.isdir(snap): return ''\n"
+        paths_code += "    candidates = []\n"
+        paths_code += "    for sd in os.listdir(snap):\n"
+        paths_code += "        sf = os.path.join(snap, sd)\n"
+        paths_code += "        if not os.path.isdir(sf): continue\n"
+        paths_code += "        try:\n"
+        paths_code += "            for fn in os.listdir(sf):\n"
+        paths_code += "                if fn.endswith('.gguf'): candidates.append(os.path.join(sf, fn))\n"
+        paths_code += "        except Exception:\n"
+        paths_code += "            pass\n"
+        paths_code += "    if not candidates: return ''\n"
+        paths_code += "    multi = [c for c in candidates if '-00001-of-' in os.path.basename(c)]\n"
+        paths_code += "    pool = sorted(multi) if multi else sorted(candidates)\n"
+        paths_code += "    return pool[0]\n"
         # Scan HF cache format (models-- directories with blobs/)
         paths_code += "def scan_hf(cache):\n"
         paths_code += "    if not os.path.isdir(cache): return\n"
@@ -942,7 +1162,24 @@ def setup_cookbook_routes() -> APIRouter:
         paths_code += "                try:\n"
         paths_code += "                    if any(x.endswith('.gguf') for x in os.listdir(sf)): is_gguf = True\n"
         paths_code += "                except Exception: pass\n"
-        paths_code += "        models.append({'repo_id':rid,'size_bytes':sz,'nb_files':nf,'has_incomplete':ic,'path':cache,'is_diffusion':is_diffusion,'is_gguf':is_gguf})\n"
+        paths_code += "        # Stale .incomplete blobs from aborted runs should not hide a model\n"
+        paths_code += "        # that already has complete files in snapshots/.\n"
+        paths_code += "        if ic and os.path.isdir(snap):\n"
+        paths_code += "            for sd in os.listdir(snap):\n"
+        paths_code += "                sf = os.path.join(snap, sd)\n"
+        paths_code += "                if not os.path.isdir(sf): continue\n"
+        paths_code += "                try:\n"
+        paths_code += "                    names = os.listdir(sf)\n"
+        paths_code += "                except Exception:\n"
+        paths_code += "                    continue\n"
+        paths_code += "                if any(n.endswith('.gguf') for n in names):\n"
+        paths_code += "                    ic = False\n"
+        paths_code += "                    break\n"
+        paths_code += "                if any(n.endswith('.safetensors') or n.endswith('.bin') for n in names):\n"
+        paths_code += "                    ic = False\n"
+        paths_code += "                    break\n"
+        paths_code += "        gguf_file = _best_gguf_in_snap(snap) if is_gguf else ''\n"
+        paths_code += "        models.append({'repo_id':rid,'size_bytes':sz,'nb_files':nf,'has_incomplete':ic,'path':cache,'is_diffusion':is_diffusion,'is_gguf':is_gguf,'gguf_file':gguf_file})\n"
         # Scan plain directory (each subdirectory = a model if it has model files)
         paths_code += "def scan_dir(p):\n"
         paths_code += "    if not os.path.isdir(p) or not safe_path(p): return\n"
@@ -987,20 +1224,12 @@ def setup_cookbook_routes() -> APIRouter:
         if host:
             _pf = f"-p {ssh_port} " if ssh_port and ssh_port != "22" else ""
             if platform == "windows":
-                # Windows: use 'python' and pipe via stdin with double-quote wrapping
                 cmd = f'ssh {_pf}{host} "python -" < \'{scan_py}\''
             else:
                 cmd = f"ssh {_pf}{host} 'python3 -' < '{scan_py}'"
+            stdout_b, stderr_b = await asyncio.to_thread(_run_shell_command, cmd, 120)
         else:
-            cmd = f"python3 '{scan_py}'"
-
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(Path.home()),
-        )
-        stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=60)
+            stdout_b, stderr_b = await asyncio.to_thread(_run_python_script, scan_py, 120)
 
         models = []
         try:
@@ -1022,10 +1251,21 @@ def setup_cookbook_routes() -> APIRouter:
                 }
                 if m.get("is_local_dir"):
                     entry["is_local_dir"] = True
+                if m.get("is_gguf"):
+                    entry["is_gguf"] = True
+                if m.get("gguf_file"):
+                    entry["gguf_file"] = m["gguf_file"]
                 models.append(entry)
         except Exception as e:
             logger.warning(f"Failed to parse cached models: {e}")
             logger.warning(f"stderr: {stderr_b.decode(errors='replace')[:500]}")
+
+        if not host:
+            seen = {m["repo_id"] for m in models}
+            for row in await asyncio.to_thread(list_local_ollama_models):
+                if row["repo_id"] not in seen:
+                    models.append(row)
+                    seen.add(row["repo_id"])
 
         return {"models": models, "host": host or "local"}
 
@@ -1181,12 +1421,74 @@ def setup_cookbook_routes() -> APIRouter:
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                 f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                 f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
-                f"-NoNewWindow -PassThru | ForEach-Object {{ Set-Content -Path \\\"$sd\\{session_id}.pid\\\" -Value $_.Id -Encoding Ascii -NoNewline }}"
+                f"-WindowStyle Hidden -PassThru | ForEach-Object {{ Set-Content -Path \\\"$sd\\{session_id}.pid\\\" -Value $_.Id -Encoding Ascii -NoNewline }}"
             )
             setup_cmd = (
                 f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
                 f'ssh {_pf}{remote} "powershell -Command \\"{launch_ps}\\""'
             )
+        elif is_windows and not remote:
+            # Local Windows: detached PowerShell (no tmux/WSL required).
+            session_dir = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            runner_ps = TMUX_LOG_DIR / f"{session_id}_run.ps1"
+            ps_lines = [
+                f'$sessionDir = "{session_dir}"',
+                'New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null',
+                f"$env:Path = '{_ps_squote(str(Path(sys.executable).parent))};' + $env:Path",
+            ]
+            if req.hf_token:
+                ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
+            if req.gpus:
+                ps_lines.append(f"$env:CUDA_VISIBLE_DEVICES = '{_ps_squote(req.gpus)}'")
+            if req.env_prefix:
+                ps_lines.append(_safe_env_prefix(req.env_prefix))
+            if "ollama" in req.cmd:
+                ps_lines.append('if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {')
+                ps_lines.append('  Write-Host "Ollama not found. Install from https://ollama.com/download/windows"; exit 1')
+                ps_lines.append('}')
+            elif "llama_cpp" in req.cmd or "llama-server" in req.cmd:
+                ps_lines.append('try { python -c "import llama_cpp" 2>$null } catch {}')
+                ps_lines.append('if ($LASTEXITCODE -ne 0) {')
+                ps_lines.append('  Write-Host "Installing llama-cpp-python..."')
+                ps_lines.append('  python -m pip install llama-cpp-python[server]')
+                ps_lines.append('}')
+            elif "vllm" in req.cmd:
+                ps_lines.append('Write-Host "ERROR: vLLM is not supported on Windows. Use llama.cpp instead."')
+                ps_lines.append('exit 1')
+            ps_lines.append(req.cmd)
+            ps_lines.append('Write-Host ""')
+            ps_lines.append('Write-Host "=== Process exited with code $LASTEXITCODE ==="')
+            runner_ps.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
+
+            _pid, spawn_err = await asyncio.to_thread(
+                _spawn_detached_local_ps1, runner_ps, session_id, session_dir
+            )
+            if spawn_err or not _pid:
+                return {"ok": False, "error": spawn_err or "Failed to start serve process", "session_id": session_id}
+            endpoint_id = None
+            short = req.repo_id.split("/")[-1] if "/" in req.repo_id else req.repo_id
+            if "diffusion_server.py" in req.cmd:
+                endpoint_id = _auto_register_image_endpoint(req, remote)
+            try:
+                from src.assistant_log import log_to_assistant
+                from src.auth_helpers import get_current_user
+                owner = get_current_user(request)
+                log_to_assistant(
+                    owner,
+                    f"Started serving {short} on local (Windows)",
+                    category="Serve",
+                )
+            except Exception:
+                pass
+            _register_cookbook_task(
+                session_id,
+                short,
+                "serve",
+                {"repo_id": req.repo_id, "_cmd": req.cmd},
+                platform="windows",
+            )
+            return {"ok": True, "session_id": session_id, "remote": "local", "endpoint_id": endpoint_id}
         else:
             # ── Linux/Termux: bash + tmux (existing flow) ──
             runner_lines = ["#!/bin/bash"]
@@ -1806,6 +2108,79 @@ def setup_cookbook_routes() -> APIRouter:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    @router.get("/api/cookbook/ollama-info")
+    async def ollama_info(owner: str = Depends(require_user)):
+        """Report local Ollama CLI version for download-tab warnings."""
+        ver_text, ver_tuple = await asyncio.to_thread(get_local_ollama_version)
+        min_s = ".".join(str(x) for x in OLLAMA_MIN_RECOMMENDED)
+        return {
+            "installed": bool(ver_text),
+            "version": ver_text,
+            "outdated": ollama_version_outdated(ver_tuple),
+            "min_recommended": min_s,
+            "download_url": "https://ollama.com/download",
+        }
+
+    @router.get("/api/cookbook/ollama-search")
+    async def ollama_search(
+        q: str = "",
+        limit: int = 15,
+        vram_gb: float = 0,
+        fit_only: bool = False,
+        agent_only: bool = False,
+        owner: str = Depends(require_user),
+    ):
+        """Search the public Ollama library (ollama.com/search)."""
+        from services.ollama_library import search_ollama_models, rank_ollama_for_hardware
+
+        try:
+            pool_limit = max(limit * 4, 40) if (vram_gb > 0 or fit_only) else limit
+            models = await asyncio.to_thread(search_ollama_models, q, pool_limit)
+            if vram_gb > 0 or fit_only or agent_only:
+                models = rank_ollama_for_hardware(
+                    models,
+                    vram_gb,
+                    limit,
+                    agent_only=agent_only,
+                    skip_embedding=not q.strip(),
+                )
+            return {"models": models, "vram_gb": vram_gb}
+        except Exception as e:
+            logger.warning("ollama-search failed: %s", e)
+            return {"models": [], "error": str(e), "vram_gb": vram_gb}
+
+    @router.get("/api/cookbook/ollama-fit")
+    async def ollama_fit(
+        vram_gb: float = 0,
+        limit: int = 10,
+        agent_only: bool = False,
+        owner: str = Depends(require_user),
+    ):
+        """Popular Ollama models ranked for available VRAM (like hf-latest)."""
+        from services.ollama_library import build_ollama_hardware_pool, rank_ollama_for_hardware
+
+        try:
+            pool = await asyncio.to_thread(build_ollama_hardware_pool, max(12, min(limit * 2, 20)))
+            models = rank_ollama_for_hardware(
+                pool,
+                vram_gb,
+                limit,
+                agent_only=agent_only,
+                skip_embedding=True,
+            )
+            if not models and vram_gb > 0:
+                models = rank_ollama_for_hardware(
+                    pool,
+                    0,
+                    limit,
+                    agent_only=agent_only,
+                    skip_embedding=True,
+                )
+            return {"models": models, "vram_gb": vram_gb}
+        except Exception as e:
+            logger.warning("ollama-fit failed: %s", e)
+            return {"models": [], "error": str(e), "vram_gb": vram_gb}
+
     @router.get("/api/cookbook/hf-latest")
     async def hf_latest(vram_gb: float = 0, limit: int = 10, pipeline: str = "text-generation", owner: str = Depends(require_user)):
         """Fetch latest HuggingFace models, filtered by what fits in available VRAM.
@@ -1984,6 +2359,10 @@ def setup_cookbook_routes() -> APIRouter:
                 logger.warning(f"Skipping task with unsafe sshPort: {_tport!r}")
                 continue
             is_win_task = task_platform == "windows" or (not remote and sys.platform == "win32")
+            local_win_handled = False
+            progress_text = ""
+            full_snapshot = ""
+            is_alive = False
             if is_win_task and remote:
                 # Windows remote: check PID file + Get-Process, read log tail
                 sd = "$env:TEMP\\odysseus-sessions"
@@ -2004,23 +2383,18 @@ def setup_cookbook_routes() -> APIRouter:
                     f"Get-Content \"{sd}\\{session_id}.log\" -Tail 10 -ErrorAction SilentlyContinue",
                 ]
             elif is_win_task:
-                sd = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
+                sd = _local_session_dir()
                 pid_file = sd / f"{session_id}.pid"
-                log_file = sd / f"{session_id}.log"
-                err_file = sd / f"{session_id}.err.log"
-                check_cmd = [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    f"$p = Get-Content '{pid_file}' -ErrorAction SilentlyContinue; "
-                    "if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } }; exit 1",
-                ]
-                capture_cmd = [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    f"Get-Content '{log_file}','{err_file}' -ErrorAction SilentlyContinue | Select-Object -Last 20",
-                ]
+                pid = _read_pid_file(pid_file)
+                is_alive = pid is not None and _pid_alive(pid)
+                full_snapshot = _read_local_session_logs(session_id, tail=200)
+                lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
+                downloading_lines = [l for l in lines if l.startswith("Downloading") or l.startswith("FILE Downloading")]
+                if downloading_lines:
+                    progress_text = downloading_lines[-1]
+                elif lines:
+                    progress_text = lines[-1]
+                local_win_handled = True
             elif remote:
                 ssh_base = ["ssh"]
                 if _tport and _tport != "22":
@@ -2031,37 +2405,39 @@ def setup_cookbook_routes() -> APIRouter:
                 check_cmd = ["tmux", "has-session", "-t", session_id]
                 capture_cmd = ["tmux", "capture-pane", "-t", session_id, "-p", "-S", "-50"]
 
-            try:
-                alive = subprocess.run(check_cmd, timeout=10, capture_output=True)
-                is_alive = alive.returncode == 0
-            except Exception:
-                is_alive = False
+            if not local_win_handled:
+                try:
+                    alive = subprocess.run(check_cmd, timeout=10, capture_output=True)
+                    is_alive = alive.returncode == 0
+                except Exception:
+                    is_alive = False
 
-            # Capture last lines for progress. Prefer the "Downloading" line
-            # (real aggregate bytes) over "Fetching N files" (whole-file count that
-            # lags with hf_transfer). Falls back to the true last line otherwise.
-            progress_text = ""
-            full_snapshot = ""
-            try:
-                cap = subprocess.run(capture_cmd, timeout=10, capture_output=True, text=True)
-                if cap.returncode == 0:
-                    full_snapshot = cap.stdout.strip()
-                    lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
-                    downloading_lines = [l for l in lines if l.startswith("Downloading")]
-                    if downloading_lines:
-                        progress_text = downloading_lines[-1]
-                    elif lines:
-                        progress_text = lines[-1]
-            except Exception:
-                pass
+                # Capture last lines for progress. Prefer the "Downloading" line
+                # (real aggregate bytes) over "Fetching N files" (whole-file count that
+                # lags with hf_transfer). Falls back to the true last line otherwise.
+                try:
+                    cap = subprocess.run(capture_cmd, timeout=10, capture_output=True, text=True)
+                    if cap.returncode == 0:
+                        full_snapshot = cap.stdout.strip()
+                        lines = [l.strip() for l in full_snapshot.split('\n') if l.strip()]
+                        downloading_lines = [l for l in lines if l.startswith("Downloading")]
+                        if downloading_lines:
+                            progress_text = downloading_lines[-1]
+                        elif lines:
+                            progress_text = lines[-1]
+                except Exception:
+                    pass
 
             # Determine status
             status = "unknown"
+            dl_done = task_type == "download" and _download_log_completed(full_snapshot)
             if is_alive:
                 lower = full_snapshot.lower()
                 has_exit = "=== process exited with code" in lower
-                has_error = "error" in lower or "failed" in lower or "traceback" in lower
-                if has_exit and task_type == "serve":
+                has_error = ("failed" in lower or "traceback" in lower) and not dl_done
+                if dl_done:
+                    status = "completed"
+                elif has_exit and task_type == "serve":
                     # Serve tasks that exit are always errors — they should run indefinitely
                     status = "error"
                 elif has_exit and "unrecognized arguments" in lower:
@@ -2080,8 +2456,8 @@ def setup_cookbook_routes() -> APIRouter:
             else:
                 # Session is dead — read the log tail to tell success from crash
                 lower = full_snapshot.lower()
-                has_error = "error" in lower or "failed" in lower or "traceback" in lower
-                if task_type == "download" and ("DOWNLOAD_OK" in full_snapshot or "100%|" in full_snapshot):
+                has_error = ("failed" in lower or "traceback" in lower) and not dl_done
+                if dl_done:
                     status = "completed"
                 elif has_error:
                     status = "error"
@@ -2096,7 +2472,7 @@ def setup_cookbook_routes() -> APIRouter:
             diagnosis = _diagnose_serve_output(full_snapshot) if task_type == "serve" and full_snapshot else None
             if diagnosis and status in {"running", "unknown", "stopped"}:
                 status = "error"
-            output_tail = "\n".join(full_snapshot.splitlines()[-12:]) if full_snapshot else ""
+            output_tail = "\n".join(full_snapshot.splitlines()[-40:]) if full_snapshot else ""
 
             results.append({
                 "session_id": session_id,

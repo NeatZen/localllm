@@ -124,7 +124,7 @@ _API_AGENT_RULES = """\
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
 - "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
 - "Research X" / "do research on X" / "look into Y" / "deep dive on Z" → call `trigger_research` with `topic`. This starts a live job that appears in the Deep Research sidebar (streams progress + final report). **Do NOT use `web_search` for these** — saw the agent do a plain web_search for "do research on X" when the user wanted the deep-research job. "research X" is a deep-research request, not a quick lookup. (web_search is only for a single quick fact mid-task.) Do NOT POST /api/research/start via app_api either — blocked. After starting, tell the user it's running in the Deep Research sidebar. Only if the user explicitly wants it inline/quick should you fall back to web_search.
-- "Open/show <panel>" (documents, library, gallery, email, inbox, sessions, brain/memories, skills, settings, notes, cookbook) → call `ui_control` with `open_panel <name>`. Panel aliases: library/doc/docs/document→documents, images→gallery, mail/inbox/emails→email, chats/history→sessions, memory/memories→brain, preferences→settings, models/serve/serving→cookbook. CRITICAL: "open memory/memories/brain" / "open skills" / "open notes" / "open documents" / "open cookbook" means OPEN THE PANEL — call `ui_control`, NOT a manage/list tool. The "manage_*" tools list contents in chat; `ui_control open_panel` opens the visual modal the user is asking for.
+- "Open/show <panel>" (documents, library, gallery, email, inbox, sessions, brain/memories, skills, settings, notes, cookbook, workspace) → call `ui_control` with `open_panel <name>`. Panel aliases: library/doc/docs/document→documents, images→gallery, mail/inbox/emails→email, chats/history→sessions, memory/memories→brain, preferences→settings, models/serve/serving→cookbook, code/project→workspace. CRITICAL: "open memory/memories/brain" / "open skills" / "open notes" / "open documents" / "open cookbook" / "open workspace" means OPEN THE PANEL — call `ui_control`, NOT a manage/list tool. The "manage_*" tools list contents in chat; `ui_control open_panel` opens the visual modal the user is asking for.
 - "Open/start a reply", "open a reply to <sender>", "draft a reply window" for email → find/read the email if needed, then call `ui_control` with `open_email_reply <uid> <folder> reply`. This opens the same email document compose window as clicking Reply in the Email UI. Do NOT call `reply_to_email` unless the user explicitly gave body text and wants to SEND immediately.
 - Bulk email actions ("delete all those", "archive these", "mark all read") require a real email tool call. Use `bulk_email` once with UIDs from the latest `list_emails` result and the same `account`; never claim success without the tool result.
 - Email UIDs are the values after `UID:` in tool output, not list row numbers. For example, row `1.` with `UID: 90186` must use `"90186"`, never `"1"`.
@@ -166,6 +166,25 @@ _API_AGENT_RULES = """\
 - Examples:
   - After `create_session` returns id `89effa28`: "Created [New Chat](#session-89effa28) — click to switch."
   - Listing sessions: "1. [Big Chat](#session-abc123) — 2h ago, 2. [Code Review](#session-def456) — 5h ago\""""
+
+_WORKSPACE_RULES = """\
+## Agent Workspace mode — YOU ARE A CODING AGENT IN A PROJECT FOLDER
+
+This chat is bound to a **workspace project** on disk. Your job is to **do the work** (create/edit files, run approved commands), not to chat about code.
+
+### Non-negotiable rules
+1. **NEVER paste code blocks in chat** for the user to copy. ALWAYS use `write_file` to create/update project files (queued for user approval in the Workspace panel).
+2. **NEVER use `create_document`** for project code — that saves to the in-app document editor, NOT the workspace folder.
+3. When the user asks to build, create, add, fix, or scaffold anything → **immediately call `write_file`** (one call per file). Do not ask "shall I create the files?" — just propose them.
+4. Work ONLY inside the project root with relative paths (`README.md`, `index.html`, `src/app.js`).
+5. Use `list_workspace_files` first if you need to see what already exists.
+6. Shell commands (`bash`/`python`) also require approval — use them for installs, builds, and tests after files exist.
+7. After proposing changes, tell the user: **"Approve the pending changes in Agent Workspace"** (they appear in the Workspace panel).
+8. Prefer `README.md` and `docs/setup.md` for new projects. Use `create_workspace_plan` for large multi-step builds.
+
+### Example (correct behavior)
+User: "Build a dividend scanner landing page"
+You: call `write_file` for `index.html`, `styles.css`, update `README.md` — then say files are queued for approval."""
 
 # Each tool section is keyed by tool name(s) it covers.
 # Sections with multiple tools use a tuple key.
@@ -210,7 +229,35 @@ Read a file and return its contents.""",
 <file path>
 <file contents>
 ```
-Write content to a file. First line is the path, rest is the content.""",
+Write content to a file. First line is the path, rest is the content. In workspace mode, writes are queued for user approval.""",
+
+    "list_workspace_files": """\
+```list_workspace_files
+[optional subdirectory]
+```
+List files/folders in the active workspace project without shell. Use to explore the project tree.""",
+
+    "propose_file_change": """\
+```propose_file_change
+action: create|modify|delete
+path: relative/path
+content: (for create/modify)
+summary: short description
+```
+Propose a file change with diff preview — user must approve before it applies.""",
+
+    "propose_command": """\
+```propose_command
+<shell command>
+summary: optional description
+```
+Propose a terminal command inside the workspace sandbox — user must approve before it runs.""",
+
+    "create_workspace_plan": """\
+```create_workspace_plan
+{"phases": [{"name": "Engineer", "goal": "...", "checkpoint": "..."}]}
+```
+Save a multi-phase plan on the project for orchestrated work (Engineer → Tester → Docs).""",
 
     "create_document": """\
 ```create_document
@@ -318,7 +365,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
     "search_chats": "- ```search_chats``` — Search across all chat history. Use when user asks 'did we discuss X?' or 'find the conversation about Y'.",
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
-    "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply>` (opens an email compose document, does NOT send), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute.",
+    "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook, workspace), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply>` (opens an email compose document, does NOT send), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" / \"open workspace\" all map to `open_panel <name>`. Theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute.",
     "list_served_models": "- ```list_served_models``` — Show what the Cookbook (LLM-serving subsystem) is currently running. NO args. Use this for ANY 'what's running' / 'what's serving' / 'show my cookbook' / 'is anything up' query. DO NOT shell out (`ps aux`, `docker ps`, etc.) — this tool is the source of truth. Failed serve tasks include recent logs plus diagnosis/retry suggestions; use those suggestions to call `serve_model` again with an adjusted command when appropriate.",
     "stop_served_model": "- ```stop_served_model``` — Stop a running model server. Args (JSON): {\"session_id\": \"<from list_served_models>\"}. Use for 'kill my cookbook' / 'stop the model' / 'shut down vLLM'.",
     "download_model": "- ```download_model``` — Download a HuggingFace model. Args (JSON): {\"repo_id\": \"Qwen/Qwen3-8B\", \"host\": \"user@gpu-box\"?, \"include\": \"*Q4_K_M*\"?}.",
@@ -537,6 +584,7 @@ def _build_system_prompt(
     mcp_disabled_map: Optional[Dict[str, set]] = None,
     compact: bool = False,
     owner: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -778,6 +826,27 @@ def _build_system_prompt(
             'The user can then edit and click Send or Draft in the editor. For an already-open email draft, '
             'edit the current document instead of creating another one.'
         )
+
+    # Workspace project context — inject sandbox rules when session is bound
+    if session_id:
+        try:
+            from src.workspace_service import get_workspace_context
+            ws_ctx = get_workspace_context(session_id)
+            if ws_ctx:
+                agent_prompt += (
+                    "\n\n" + _WORKSPACE_RULES
+                    + f"\n**Active project:** {ws_ctx.project_name or ws_ctx.slug} "
+                    f"(slug: {ws_ctx.slug})\n"
+                    f"**Root:** `{ws_ctx.root_path}`\n"
+                )
+                if ws_ctx.plan_json:
+                    import json as _json
+                    agent_prompt += (
+                        f"\n**Saved plan:**\n```json\n"
+                        f"{_json.dumps(ws_ctx.plan_json, indent=2)}\n```\n"
+                    )
+        except Exception:
+            pass
 
     # Inject relevant skills based on the user's last message. The
     # SkillsManager does a Jaccard token-match over published skills'
@@ -1316,6 +1385,22 @@ async def stream_agent_loop(
         _relevant_tools.update({"create_document", "manage_memory", "manage_notes"})
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
+    # Workspace sessions always need filesystem + workspace tools in the prompt
+    if session_id:
+        try:
+            from src.workspace_service import get_workspace_context
+            if get_workspace_context(session_id):
+                if _relevant_tools is None:
+                    _relevant_tools = set()
+                _relevant_tools.update({
+                    "read_file", "write_file", "bash", "python",
+                    "list_workspace_files", "propose_file_change",
+                    "propose_command", "create_workspace_plan",
+                })
+                logger.info("[workspace] Injected workspace tool set into agent prompt")
+        except Exception:
+            pass
+
     # If a document is open the model needs the editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran
     # or what keywords were in the latest user message.
@@ -1366,12 +1451,23 @@ async def stream_agent_loop(
         _is_api_model = False
     else:
         _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
+    # Built-in llama.cpp server is not started with native function-calling
+    # unless the endpoint is explicitly flagged. Sending OpenAI tool schemas to
+    # it produces empty/tool-less replies (looks like "Done." in workspace UI).
+    try:
+        from services.bundled_llm import is_bundled_endpoint_url
+        if is_bundled_endpoint_url(endpoint_url) and _endpoint_supports is not True:
+            _is_api_model = False
+            logger.info("[agent] bundled local endpoint — fenced tool blocks only")
+    except Exception:
+        pass
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
         compact=_is_api_model,
         owner=owner,
+        session_id=session_id,
     )
     prep_timings["prompt_build"] = time.time() - _t2
 
@@ -1435,6 +1531,7 @@ async def stream_agent_loop(
     _tool_type_counts: collections.Counter = collections.Counter()
     _THINK_RE = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
+    _workspace_nudged = False  # one-shot nudge when workspace build request got no files
 
     # Document streaming state (persists across rounds)
     _doc_acc = ""          # accumulated tool-call JSON arguments
@@ -1725,6 +1822,35 @@ async def stream_agent_loop(
         round_texts.append(cleaned_round)
 
         if not tool_blocks:
+            # Workspace: reject no-tool "done" on build/scaffold requests (common
+            # with small local models that reply in prose instead of write_file).
+            if not _workspace_nudged and not _force_answer and session_id:
+                try:
+                    from src.workspace_service import get_workspace_context
+                    _ws = get_workspace_context(session_id)
+                    if _ws:
+                        _last = (_extract_last_user_message(messages) or "").lower()
+                        _buildish = any(k in _last for k in (
+                            "build", "create", "make", "add", "scaffold", "landing",
+                            "app", "page", "file", "implement", "write", "setup", "scanner",
+                        ))
+                        _answer = _THINK_RE.sub("", cleaned_round).strip()
+                        if _buildish and (not _answer or len(_answer) < 120):
+                            _workspace_nudged = True
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    "You have NOT created any project files yet. "
+                                    "Use a ```write_file``` block now: line 1 = relative path "
+                                    "(e.g. index.html), remaining lines = file content. "
+                                    "One block per file. Do NOT paste code in chat or say "
+                                    "only 'Done' — propose files for user approval."
+                                ),
+                            })
+                            yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                            continue
+                except Exception as _ws_nudge_err:
+                    logger.debug("workspace nudge skipped: %s", _ws_nudge_err)
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work

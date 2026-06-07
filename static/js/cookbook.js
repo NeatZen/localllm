@@ -998,76 +998,150 @@ function _wireTabEvents(body) {
     });
   }
 
+  // Shared download payload helpers (HF manual input + Ollama search pull)
+  function _resolveDownloadHost() {
+    const dlSrv = document.getElementById('hwfit-dl-server');
+    const srvVal = dlSrv ? dlSrv.value : 'local';
+    if (srvVal === 'local') return '';
+    return _serverByVal(srvVal)?.host || '';
+  }
+
+  function _buildDownloadPayload(repoId, source = 'hf', extra = {}) {
+    const host = _resolveDownloadHost();
+    const _hsrv = _envState.servers.find(sv => sv.host === host) || {};
+    const env = host ? (_hsrv.env || 'none') : _envState.env;
+    const envPath = host ? (_hsrv.envPath || '') : _envState.envPath;
+    const payload = { repo_id: repoId, source, ...extra };
+    if (source === 'hf' && _envState.hfToken) payload.hf_token = _envState.hfToken;
+    if (host) {
+      payload.remote_host = host;
+      const _sp3 = _getPort(host);
+      if (_sp3) payload.ssh_port = _sp3;
+    }
+    const srvPlatform = _getPlatform(host);
+    const isLocal = !host;
+    const isWin = isLocal ? _isWindows() : (srvPlatform === 'windows');
+    if (isWin) payload.platform = 'windows';
+    else if (srvPlatform) payload.platform = srvPlatform;
+    if (source === 'hf' && isWin) payload.disable_hf_transfer = true;
+    if (isWin) {
+      if (env === 'venv' && envPath) {
+        payload.env_prefix = '& ' + _psQuote(envPath.endsWith('\\Scripts\\Activate.ps1') ? envPath : envPath + '\\Scripts\\Activate.ps1');
+      } else if (env === 'conda' && envPath) {
+        payload.env_prefix = 'conda activate ' + _psQuote(envPath);
+      }
+    } else {
+      if (env === 'venv' && envPath) {
+        const p = envPath;
+        payload.env_prefix = 'source ' + _shellQuote(p.endsWith('/bin/activate') ? p : p + '/bin/activate');
+      } else if (env === 'conda' && envPath) {
+        payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(envPath);
+      }
+    }
+    return payload;
+  }
+
+  function _parseDownloadTarget(raw) {
+    let text = (raw || '').trim();
+    if (!text) return null;
+    if (/^ollama:\s*/i.test(text)) {
+      return { source: 'ollama', repo_id: text.replace(/^ollama:\s*/i, '').trim() };
+    }
+    const ollamaUrl = text.match(/^https?:\/\/(?:www\.)?ollama\.com\/library\/([^/?#\s]+)/i);
+    if (ollamaUrl) return { source: 'ollama', repo_id: ollamaUrl[1] };
+    const pullCmd = text.match(/^ollama\s+pull\s+(\S+)/i);
+    if (pullCmd) return { source: 'ollama', repo_id: pullCmd[1] };
+    text = text.replace(/^hf\.co\//, '');
+    const hfMatch = text.match(/^https?:\/\/huggingface\.co\/([^/]+\/[^/?#]+(?::[^/?#\s]+)?)/);
+    if (hfMatch) text = hfMatch[1];
+    const tagSplit = text.match(/^([^\s/:]+\/[^\s/:]+):([^\s/]+)$/);
+    if (tagSplit) {
+      return { source: 'hf', repo_id: tagSplit[1], include: `*${tagSplit[2]}*` };
+    }
+    if (/^[^\s/]+\/[^\s/]+$/.test(text)) {
+      return { source: 'hf', repo_id: text };
+    }
+    if (/^[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9._+-]+)?$/.test(text)) {
+      return { source: 'ollama', repo_id: text };
+    }
+    return null;
+  }
+
+  function _pickOllamaTag(sizeTags, vramGb) {
+    const tags = (sizeTags || []).filter(t => /^\d/i.test(t) || t === 'latest');
+    if (!tags.length) return 'latest';
+    if (tags.includes('latest')) return 'latest';
+    const sized = tags.map(t => {
+      const m = t.match(/^(\d+(?:\.\d+)?)[bB]$/);
+      return { tag: t.toLowerCase(), gb: m ? parseFloat(m[1]) * 2 : 999 };
+    }).filter(x => x.gb < 900);
+    if (vramGb > 0 && sized.length) {
+      const fit = sized.filter(x => x.gb * 1.3 <= vramGb);
+      if (fit.length) return fit.sort((a, b) => b.gb - a.gb)[0].tag;
+    }
+    return sized.sort((a, b) => b.gb - a.gb)[0]?.tag || tags[0];
+  }
+
+  async function _pullOllamaModel(modelRef, btnEl) {
+    const payload = _buildDownloadPayload(modelRef, 'ollama');
+    const shortName = modelRef.split(':')[0].split('/').pop();
+    if (btnEl) btnEl.disabled = true;
+    try {
+      await _retryDownload(shortName, payload);
+    } finally {
+      if (btnEl) btnEl.disabled = false;
+    }
+  }
+
+  const _vramCache = {};
+  async function _getSelectedServerVram() {
+    const dlSrv = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
+    const val = dlSrv?.value || 'local';
+    let host = '';
+    let sshPort = '';
+    let platform = '';
+    if (val !== 'local') {
+      const s = _serverByVal(val);
+      if (s) {
+        host = s.host || '';
+        sshPort = s.port || '';
+        platform = s.platform || '';
+      }
+    }
+    const cacheKey = host || 'local';
+    if (_vramCache[cacheKey] !== undefined) return _vramCache[cacheKey];
+    try {
+      const qp = new URLSearchParams();
+      if (host) qp.set('host', host);
+      if (sshPort) qp.set('ssh_port', sshPort);
+      if (platform) qp.set('platform', platform);
+      const r = await fetch(`/api/hwfit/system?${qp}`);
+      if (r.ok) {
+        const sys = await r.json();
+        const v = sys?.gpu_vram_gb || 0;
+        _vramCache[cacheKey] = v;
+        return v;
+      }
+    } catch {}
+    _vramCache[cacheKey] = 0;
+    return 0;
+  }
+
   // Download input
   const dlBtn = document.getElementById('cookbook-dl-btn');
   const dlInput = document.getElementById('cookbook-dl-repo');
   if (dlBtn && dlInput) {
-    function _stripHfUrl(input) {
-      let repo = input.trim();
-      // Strip Ollama-style "hf.co/" prefix if present (e.g. hf.co/unsloth/...:tag)
-      repo = repo.replace(/^hf\.co\//, '');
-      const hfMatch = repo.match(/^https?:\/\/huggingface\.co\/([^/]+\/[^/?#]+(?::[^/?#\s]+)?)/);
-      if (hfMatch) repo = hfMatch[1];
-      return repo;
-    }
-    // Split `org/repo:tag` (Ollama/llama.cpp style) into repo + include-glob.
-    // The `:tag` picks a specific GGUF quantization file from the repo.
-    function _splitRepoTag(raw) {
-      const m = raw.match(/^([^\s/:]+\/[^\s/:]+):([^\s/]+)$/);
-      if (!m) return { repo: raw, include: null };
-      return { repo: m[1], include: `*${m[2]}*` };
-    }
     const triggerDownload = async () => {
-      const rawRepo = _stripHfUrl(dlInput.value);
-      if (!rawRepo) return;
-      const { repo, include: autoInclude } = _splitRepoTag(rawRepo);
-      // HuggingFace repo IDs must be `org/model`. A bare model name would 404
-      // at snapshot_download time with a raw traceback, so reject it up front.
-      if (!/^[^\s/]+\/[^\s/]+$/.test(repo)) {
-        uiModule.showToast('Enter a full HuggingFace repo ID like "org/model-name" (or paste the full HF URL).');
+      const target = _parseDownloadTarget(dlInput.value);
+      if (!target) {
+        uiModule.showToast('Enter a HuggingFace repo (org/model), Ollama model (qwen2.5:7b), or paste a library URL.');
         dlInput.focus();
         return;
       }
-      // Resolve the host straight from THIS window's server dropdown, by index
-      // into the (consistent) servers list. We deliberately don't use
-      // _envState.remoteHost — there can be multiple copies of the cookbook
-      // state in memory and they disagree on the active host, which is what sent
-      // downloads to the wrong server. The dropdown the user sees is the truth.
-      const dlSrv = document.getElementById('hwfit-dl-server');
-      const srvVal = dlSrv ? dlSrv.value : 'local';
-      let host = '';
-      if (srvVal !== 'local') {
-        host = _serverByVal(srvVal)?.host || '';
-      }
-      const _hsrv = _envState.servers.find(sv => sv.host === host) || {};
-      let env = host ? (_hsrv.env || 'none') : _envState.env;
-      let envPath = host ? (_hsrv.envPath || '') : _envState.envPath;
-      const payload = { repo_id: repo };
-      if (autoInclude) payload.include = autoInclude;
-      if (_envState.hfToken) payload.hf_token = _envState.hfToken;
-      if (host) { payload.remote_host = host; const _sp3 = _getPort(host); if (_sp3) payload.ssh_port = _sp3; }
-      const srvPlatform = _getPlatform(host);
-      const isLocal = !host;
-      const isWin = isLocal ? _isWindows() : (srvPlatform === 'windows');
-      if (isWin) payload.platform = 'windows';
-      else if (srvPlatform) payload.platform = srvPlatform;
-      if (isWin) {
-        if (env === 'venv' && envPath) {
-          payload.env_prefix = '& ' + _psQuote(envPath.endsWith('\\Scripts\\Activate.ps1') ? envPath : envPath + '\\Scripts\\Activate.ps1');
-        } else if (env === 'conda' && envPath) {
-          payload.env_prefix = 'conda activate ' + _psQuote(envPath);
-        }
-      } else {
-        if (env === 'venv' && envPath) {
-          const p = envPath;
-          payload.env_prefix = 'source ' + _shellQuote(p.endsWith('/bin/activate') ? p : p + '/bin/activate');
-        } else if (env === 'conda' && envPath) {
-          payload.env_prefix = 'eval "$(conda shell.bash hook)" && conda activate ' + _shellQuote(envPath);
-        }
-      }
-      const shortName = repo.split('/').pop();
+      const payload = _buildDownloadPayload(target.repo_id, target.source, target.include ? { include: target.include } : {});
+      const shortName = target.repo_id.split(':')[0].split('/').pop();
       dlBtn.disabled = true;
-      uiModule.showToast(`Starting download: ${shortName}...`);
+      uiModule.showToast(`Starting ${target.source === 'ollama' ? 'pull' : 'download'}: ${shortName}...`);
       try {
         await _retryDownload(shortName, payload);
       } finally {
@@ -1081,6 +1155,24 @@ function _wireTabEvents(body) {
     });
   }
 
+  const ollamaBanner = document.getElementById('cookbook-ollama-version-banner');
+  if (ollamaBanner) {
+    fetch('/api/cookbook/ollama-info', { credentials: 'same-origin' })
+      .then(r => r.ok ? r.json() : null)
+      .then(info => {
+        if (!info || !info.outdated) return;
+        ollamaBanner.style.display = 'block';
+        ollamaBanner.style.borderColor = 'var(--color-error, #c44)';
+        const ver = (info.version || 'unknown').replace(/^ollama version is\s+/i, '');
+        ollamaBanner.innerHTML =
+          `Ollama <strong>${esc(ver)}</strong> is outdated. `
+          + `Most library models need <strong>${esc(info.min_recommended)}+</strong>. `
+          + `<a href="${esc(info.download_url)}" target="_blank" rel="noopener">Update Ollama</a> `
+          + `(quit the tray app fully after installing), then retry pulls.`;
+      })
+      .catch(() => {});
+  }
+
   // Latest HF models that fit — collapsible card list
   const hfToggle = document.getElementById('cookbook-hf-latest-toggle');
   const hfArrow = document.getElementById('cookbook-hf-latest-arrow');
@@ -1088,43 +1180,6 @@ function _wireTabEvents(body) {
   const hfRefresh = document.getElementById('cookbook-hf-latest-refresh');
   if (hfToggle && hfList) {
     let _loaded = false;
-    // Per-server VRAM cache so we don't re-probe on every expand
-    const _vramCache = {};
-    async function _getSelectedServerVram() {
-      // Prefer the "What Fits" dropdown (the main control that shows hardware);
-      // fall back to the download dropdown. This is the server the list ranks for.
-      const dlSrv = document.getElementById('hwfit-server-select') || document.getElementById('hwfit-dl-server');
-      const val = dlSrv?.value || 'local';
-      let host = '';
-      let sshPort = '';
-      let platform = '';
-      if (val !== 'local') {
-        const s = _serverByVal(val);
-        if (s) {
-          host = s.host || '';
-          sshPort = s.port || '';
-          platform = s.platform || '';
-        }
-      }
-      const cacheKey = host || 'local';
-      if (_vramCache[cacheKey] !== undefined) return _vramCache[cacheKey];
-      // Fetch system info for this server from hwfit
-      try {
-        const qp = new URLSearchParams();
-        if (host) qp.set('host', host);
-        if (sshPort) qp.set('ssh_port', sshPort);
-        if (platform) qp.set('platform', platform);
-        const r = await fetch(`/api/hwfit/system?${qp}`);
-        if (r.ok) {
-          const sys = await r.json();
-          const v = sys?.gpu_vram_gb || 0;
-          _vramCache[cacheKey] = v;
-          return v;
-        }
-      } catch {}
-      _vramCache[cacheKey] = 0;
-      return 0;
-    }
     async function _loadLatest() {
       // Match the Dependencies loader: whirlpool spinner + text label so the
       // user gets immediate feedback while the scan runs.
@@ -1228,6 +1283,216 @@ function _wireTabEvents(body) {
     };
     document.getElementById('hwfit-dl-server')?.addEventListener('change', _onServerChange);
     document.getElementById('hwfit-server-select')?.addEventListener('change', _onServerChange);
+  }
+
+  function _ollamaFitLabel(level) {
+    return { perfect: 'PERFECT', good: 'GOOD', tight: 'TIGHT', unknown: '' }[level] || '';
+  }
+
+  function _renderOllamaCards(listEl, models, vramGb) {
+    if (!listEl || !models.length) {
+      listEl.innerHTML = '<div class="hwfit-loading">No Ollama models fit this hardware</div>';
+      return;
+    }
+    let html = '';
+    for (const m of models) {
+      const tag = m.recommended_tag || _pickOllamaTag(m.size_tags, vramGb);
+      const modelRef = m.recommended_ref || (tag && tag !== 'latest' ? `${m.name}:${tag}` : (m.model_ref || m.name));
+      const meta = [];
+      if (m.needed_vram_gb) meta.push(`~${m.needed_vram_gb}GB`);
+      else if (vramGb > 0) meta.push(`fits ${Math.round(vramGb)}GB VRAM`);
+      if (m.pulls) meta.push(`${m.pulls} pulls`);
+      if (m.capabilities?.length) meta.push(m.capabilities.slice(0, 3).join(', '));
+      const fitLabel = _ollamaFitLabel(m.fit_level);
+      const fitColor = _fitColors[m.fit_level === 'tight' ? 'marginal' : m.fit_level] || 'var(--fg-muted)';
+      html += `<div class="doclib-card memory-item cookbook-ollama-card" data-model-ref="${esc(modelRef)}" style="cursor:default;">`;
+      html += `<div style="flex:1;min-width:0;">`;
+      html += `<div class="memory-item-title">${esc(m.name)}`;
+      if (fitLabel) html += ` <span style="font-size:9px;font-weight:700;color:${fitColor};">${fitLabel}</span>`;
+      html += ` <a href="${esc(m.url || ('https://ollama.com/library/' + m.name))}" target="_blank" rel="noopener" class="cookbook-hf-link">Ollama ↗</a></div>`;
+      if (m.description) {
+        html += `<div class="memory-item-meta" style="font-size:10px;opacity:0.65;margin-top:2px;line-height:1.35;">${esc(m.description.slice(0, 140))}${m.description.length > 140 ? '…' : ''}</div>`;
+      }
+      if (meta.length) {
+        html += `<div class="memory-item-meta" style="font-size:10px;opacity:0.5;margin-top:2px;">${esc(meta.join(' · '))}</div>`;
+      }
+      html += `<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;align-items:center;">`;
+      const fitting = (m.fitting_tags || []).filter(t => /^\d/i.test(t));
+      const tagsToShow = fitting.length ? fitting.slice(0, 6) : (m.size_tags || []).filter(t => /^\d/i.test(t)).slice(0, 6);
+      if (!tagsToShow.length && tag) tagsToShow.push(tag);
+      for (const t of tagsToShow) {
+        const ref = `${m.name}:${t}`;
+        const isBest = t === tag || t === m.recommended_tag;
+        html += `<button type="button" class="${isBest ? 'cookbook-btn' : 'memory-toolbar-btn'} cookbook-ollama-pull-tag" data-model-ref="${esc(ref)}" style="height:22px;font-size:10px;padding:0 8px;${isBest ? '' : ''}">Pull ${esc(t)}</button>`;
+      }
+      html += `<button type="button" class="cookbook-btn cookbook-ollama-pull-btn" data-model-ref="${esc(modelRef)}" style="height:22px;font-size:10px;padding:0 10px;margin-left:auto;">Pull best</button>`;
+      html += `</div></div></div>`;
+    }
+    listEl.innerHTML = html;
+    listEl.querySelectorAll('.cookbook-ollama-pull-btn, .cookbook-ollama-pull-tag').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const ref = btn.dataset.modelRef;
+        if (ref) _pullOllamaModel(ref, btn);
+      });
+    });
+    listEl.querySelectorAll('.cookbook-ollama-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('a, button')) return;
+        const dl = document.getElementById('cookbook-dl-repo');
+        if (dl) {
+          dl.value = card.dataset.modelRef || '';
+          dl.focus();
+        }
+      });
+    });
+  }
+
+  // Best Ollama models for your hardware
+  const ollamaFitToggle = document.getElementById('cookbook-ollama-fit-toggle');
+  const ollamaFitArrow = document.getElementById('cookbook-ollama-fit-arrow');
+  const ollamaFitList = document.getElementById('cookbook-ollama-fit-list');
+  const ollamaFitRefresh = document.getElementById('cookbook-ollama-fit-refresh');
+  if (ollamaFitToggle && ollamaFitList) {
+    let _ollamaFitLoaded = false;
+    async function _loadOllamaFit() {
+      ollamaFitList.innerHTML = '<div class="hwfit-loading">Finding best Ollama models…</div>';
+      const vram = await _getSelectedServerVram();
+      try {
+        let lastErr = '';
+        const fetchFit = async (v) => {
+          const res = await fetch(`/api/cookbook/ollama-fit?vram_gb=${v}&limit=10`, { credentials: 'same-origin' });
+          if (!res.ok) throw new Error(res.status === 404 ? 'API not loaded — hard-refresh' : `HTTP ${res.status}`);
+          const data = await res.json();
+          if (data.error) lastErr = data.error;
+          return data.models || [];
+        };
+        let models = await fetchFit(vram);
+        if (!models.length && vram > 0) models = await fetchFit(0);
+        if (!models.length) {
+          ollamaFitList.innerHTML = `<div class="hwfit-loading">${lastErr ? `Couldn't load (${esc(lastErr)})` : 'No fitting Ollama models found'}</div>`;
+          return;
+        }
+        _renderOllamaCards(ollamaFitList, models, vram);
+      } catch (e) {
+        ollamaFitList.innerHTML = `<div class="hwfit-loading">Couldn't load Ollama picks (${esc(e.message || 'error')})</div>`;
+      }
+    }
+    ollamaFitToggle.addEventListener('click', () => {
+      const isOpen = ollamaFitList.style.display !== 'none';
+      ollamaFitList.style.display = isOpen ? 'none' : 'flex';
+      if (ollamaFitArrow) ollamaFitArrow.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+      if (!isOpen && !_ollamaFitLoaded) {
+        _ollamaFitLoaded = true;
+        _loadOllamaFit();
+      }
+    });
+    if (ollamaFitRefresh) {
+      ollamaFitRefresh.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _ollamaFitLoaded = true;
+        _loadOllamaFit();
+        if (ollamaFitList.style.display === 'none') {
+          ollamaFitList.style.display = 'flex';
+          if (ollamaFitArrow) ollamaFitArrow.style.transform = 'rotate(90deg)';
+        }
+      });
+    }
+    const _onOllamaServerChange = () => {
+      _ollamaFitLoaded = false;
+      if (ollamaFitList.style.display !== 'none') {
+        _ollamaFitLoaded = true;
+        _loadOllamaFit();
+      }
+    };
+    document.getElementById('hwfit-dl-server')?.addEventListener('change', _onOllamaServerChange);
+    document.getElementById('hwfit-server-select')?.addEventListener('change', _onOllamaServerChange);
+  }
+
+  // Ollama library search — browse ollama.com/search with one-click pull
+  const ollamaToggle = document.getElementById('cookbook-ollama-search-toggle');
+  const ollamaArrow = document.getElementById('cookbook-ollama-search-arrow');
+  const ollamaList = document.getElementById('cookbook-ollama-search-list');
+  const ollamaInput = document.getElementById('cookbook-ollama-search-input');
+  const ollamaRefresh = document.getElementById('cookbook-ollama-search-refresh');
+  if (ollamaToggle && ollamaList) {
+    let _ollamaLoaded = false;
+    let _ollamaDebounce = null;
+
+    async function _loadOllamaSearch(query = '') {
+      ollamaList.innerHTML = '<div class="hwfit-loading">Searching Ollama library…</div>';
+      try {
+        const vram = await _getSelectedServerVram();
+        const params = new URLSearchParams({ limit: '12', vram_gb: String(vram || 0) });
+        if (query.trim()) params.set('q', query.trim());
+        const res = await fetch(`/api/cookbook/ollama-search?${params}`, { credentials: 'same-origin' });
+        if (!res.ok) {
+          const errText = res.status === 404
+            ? 'Search API not loaded — restart Odysseus and hard-refresh (Ctrl+Shift+R)'
+            : `HTTP ${res.status}`;
+          ollamaList.innerHTML = `<div class="hwfit-loading">Couldn't search Ollama (${esc(errText)})</div>`;
+          return;
+        }
+        const data = await res.json();
+        if (data.error && !(data.models || []).length) {
+          ollamaList.innerHTML = `<div class="hwfit-loading">Couldn't search Ollama (${esc(data.error)})</div>`;
+          return;
+        }
+        let models = data.models || [];
+        if (!models.length && vram > 0 && query.trim()) {
+          const fallback = new URLSearchParams({ limit: '12', q: query.trim(), vram_gb: '0' });
+          const res2 = await fetch(`/api/cookbook/ollama-search?${fallback}`, { credentials: 'same-origin' });
+          if (res2.ok) models = (await res2.json()).models || [];
+        }
+        if (!models.length) {
+          ollamaList.innerHTML = '<div class="hwfit-loading">No Ollama models found</div>';
+          return;
+        }
+        _renderOllamaCards(ollamaList, models, vram);
+      } catch {
+        ollamaList.innerHTML = '<div class="hwfit-loading">Failed to load Ollama search</div>';
+      }
+    }
+
+    ollamaToggle.addEventListener('click', () => {
+      const isOpen = ollamaList.style.display !== 'none';
+      ollamaList.style.display = isOpen ? 'none' : 'flex';
+      if (ollamaArrow) ollamaArrow.style.transform = isOpen ? 'rotate(0deg)' : 'rotate(90deg)';
+      if (!isOpen && !_ollamaLoaded) {
+        _ollamaLoaded = true;
+        _loadOllamaSearch(ollamaInput?.value || '');
+      }
+    });
+    if (ollamaRefresh) {
+      ollamaRefresh.addEventListener('click', (e) => {
+        e.stopPropagation();
+        _ollamaLoaded = true;
+        _loadOllamaSearch(ollamaInput?.value || '');
+        if (ollamaList.style.display === 'none') {
+          ollamaList.style.display = 'flex';
+          if (ollamaArrow) ollamaArrow.style.transform = 'rotate(90deg)';
+        }
+      });
+    }
+    if (ollamaInput) {
+      ollamaInput.addEventListener('input', () => {
+        clearTimeout(_ollamaDebounce);
+        _ollamaDebounce = setTimeout(() => {
+          if (ollamaList.style.display !== 'none') _loadOllamaSearch(ollamaInput.value);
+        }, 350);
+      });
+      ollamaInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          _ollamaLoaded = true;
+          if (ollamaList.style.display === 'none') {
+            ollamaList.style.display = 'flex';
+            if (ollamaArrow) ollamaArrow.style.transform = 'rotate(90deg)';
+          }
+          _loadOllamaSearch(ollamaInput.value);
+        }
+      });
+    }
   }
 
   // Server add button, row removal, model-dir add/remove, and per-row wiring
@@ -1386,9 +1651,10 @@ function _renderRecipes() {
   html += `<button class="memory-toolbar-btn cookbook-dl-add-server" title="Add server in Settings" style="height:28px;">add server</button>`;
   html += `</div>`;
   html += `<div class="cookbook-dl-input" style="margin-top:0;">`;
-  html += `<input type="text" class="cookbook-dl-repo" id="cookbook-dl-repo" placeholder="org/model-name, HF URL, or org/model:QUANT_TAG" />`;
+  html += `<input type="text" class="cookbook-dl-repo" id="cookbook-dl-repo" placeholder="HF org/model, Ollama name:tag, or library URL" />`;
   html += `<button class="cookbook-btn cookbook-dl-btn" id="cookbook-dl-btn">Download</button>`;
   html += `</div>`;
+  html += `<div id="cookbook-ollama-version-banner" style="display:none;margin-top:6px;padding:8px 10px;border-radius:4px;border:1px solid var(--border);font-size:11px;line-height:1.45;"></div>`;
   // Latest HF models that fit — collapsible card list
   html += `<div style="margin-top:2px;position:relative;top:-8px;">`;
   html += `<div style="display:flex;gap:4px;align-items:center;">`;
@@ -1399,6 +1665,29 @@ function _renderRecipes() {
   html += `<button type="button" class="memory-toolbar-btn" id="cookbook-hf-latest-refresh" title="Refresh" style="height:26px;width:26px;padding:0;border-radius:4px;">\u21BB</button>`;
   html += `</div>`;
   html += `<div id="cookbook-hf-latest-list" style="display:none;margin-top:4px;max-height:320px;overflow-y:auto;flex-direction:column;gap:4px;"></div>`;
+  html += `</div>`;
+  // Best Ollama models for your hardware
+  html += `<div style="margin-top:6px;">`;
+  html += `<div style="display:flex;gap:4px;align-items:center;">`;
+  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-ollama-fit-toggle" style="flex:1;text-align:left;height:26px;display:flex;align-items:center;gap:6px;border-radius:4px;">`;
+  html += `<span id="cookbook-ollama-fit-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;">\u25B8</span>`;
+  html += `<span style="pointer-events:none;">Best Ollama models for your hardware</span>`;
+  html += `</button>`;
+  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-ollama-fit-refresh" title="Refresh" style="height:26px;width:26px;padding:0;border-radius:4px;">\u21BB</button>`;
+  html += `</div>`;
+  html += `<div id="cookbook-ollama-fit-list" style="display:none;margin-top:4px;max-height:320px;overflow-y:auto;flex-direction:column;gap:4px;"></div>`;
+  html += `</div>`;
+  // Ollama library search
+  html += `<div style="margin-top:6px;">`;
+  html += `<div style="display:flex;gap:4px;align-items:center;">`;
+  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-ollama-search-toggle" style="flex:1;text-align:left;height:26px;display:flex;align-items:center;gap:6px;border-radius:4px;">`;
+  html += `<span id="cookbook-ollama-search-arrow" style="display:inline-block;transition:transform 0.15s;pointer-events:none;">\u25B8</span>`;
+  html += `<span style="pointer-events:none;">Search Ollama library</span>`;
+  html += `</button>`;
+  html += `<button type="button" class="memory-toolbar-btn" id="cookbook-ollama-search-refresh" title="Refresh" style="height:26px;width:26px;padding:0;border-radius:4px;">\u21BB</button>`;
+  html += `</div>`;
+  html += `<input type="text" class="cookbook-field-input" id="cookbook-ollama-search-input" placeholder="Search models (qwen, llama, mistral…)" style="width:100%;height:28px;margin-top:4px;box-sizing:border-box;" />`;
+  html += `<div id="cookbook-ollama-search-list" style="display:none;margin-top:4px;max-height:360px;overflow-y:auto;flex-direction:column;gap:4px;"></div>`;
   html += `</div>`;
 
   // Search section
@@ -1416,6 +1705,7 @@ function _renderRecipes() {
   // Image tab removed — text→image gen is gone from this build (only inpaint
    // remains, which uses its own settings panel). Vision (multimodal) stays.
   html += '<option value="multimodal">Vision</option></select>';
+  html += '<label class="hwfit-agent-filter" title="Show only models suitable for Agent mode (tool calling)"><input type="checkbox" id="hwfit-agent-only" /> Agent</label>';
   html += '<input type="text" class="cookbook-field-input hwfit-search" id="hwfit-search" placeholder="Search models..." style="flex:1;" />';
   // Quant (Q4/Q8/…) lives next to the search now.
   html += '<select class="cookbook-field-input hwfit-quant" id="hwfit-quant" style="height:28px;">';

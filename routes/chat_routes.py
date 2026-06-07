@@ -40,6 +40,15 @@ logger = logging.getLogger(__name__)
 _active_streams: Dict[str, dict] = {}
 
 
+def _session_workspace_project_id(session_id: str):
+    """Return workspace_project_id for a session, or None."""
+    db = SessionLocal()
+    try:
+        return db.query(DBSession.workspace_project_id).filter(DBSession.id == session_id).scalar()
+    finally:
+        db.close()
+
+
 def _stream_set(session_id: str, **fields) -> None:
     """Update fields on the active-stream entry for `session_id`, or
     no-op if the entry has already been popped. Using .get() avoids a
@@ -282,9 +291,22 @@ def setup_chat_routes(
         # Ensure session has auth headers
         resolve_session_auth(sess, session)
 
+        _workspace_project_id = _session_workspace_project_id(session)
+        _is_workspace_session = bool(_workspace_project_id)
+        if _is_workspace_session:
+            chat_mode = "agent"
+            user_requested_agent = True
+            auto_escalated = False
+            allow_bash = "true"
+            logger.info(
+                "[workspace] Agent mode forced for session %s (project %s)",
+                session, _workspace_project_id,
+            )
+
         # Built-in CPU model: agent mode is too slow (large tool payloads, single
         # inference slot). Force plain chat so users get replies in seconds.
-        if _is_bundled_local_endpoint(sess.endpoint_url) and chat_mode == "agent":
+        # Workspace sessions are exempt — they need tools to create project files.
+        if _is_bundled_local_endpoint(sess.endpoint_url) and chat_mode == "agent" and not _is_workspace_session:
             chat_mode = "chat"
             user_requested_agent = False
             auto_escalated = False
@@ -292,12 +314,15 @@ def setup_chat_routes(
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"
+        # Workspace builds need the agent tool loop, not research or plain chat
+        if _is_workspace_session:
+            do_research = False
         if not do_research:
             try:
                 _mode_db = SessionLocal()
                 _db_mode = _mode_db.query(DBSession.mode).filter(DBSession.id == session).scalar()
                 _mode_db.close()
-                if _db_mode == 'research_pending':
+                if _db_mode == 'research_pending' and not _is_workspace_session:
                     do_research = True
                     logger.info(f"Session {session} in research_pending — auto-triggering research")
             except Exception:
@@ -429,7 +454,7 @@ def setup_chat_routes(
                 disabled_tools.update({"manage_memory", "manage_skills"})
             if not _privs.get("can_use_research", True):
                 _research_flags["do"] = False
-            if not _privs.get("can_use_agent", True):
+            if not _privs.get("can_use_agent", True) and not _is_workspace_session:
                 _effective_mode = 'chat'
                 chat_mode = 'chat'
         # Global admin disabled tools
@@ -465,6 +490,22 @@ def setup_chat_routes(
             # In chat mode compare, disable ALL agent tools (no bash, python, file ops)
             if chat_mode == 'chat':
                 disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "search_chats", "manage_tasks"})
+
+        # Workspace agent: filesystem tools ON, document editor OFF (files live on disk)
+        if _is_workspace_session:
+            disabled_tools.discard("bash")
+            disabled_tools.discard("python")
+            disabled_tools.discard("read_file")
+            disabled_tools.discard("write_file")
+            for _wt in (
+                "list_workspace_files", "propose_file_change",
+                "propose_command", "create_workspace_plan",
+            ):
+                disabled_tools.discard(_wt)
+            disabled_tools.update({
+                "create_document", "edit_document",
+                "update_document", "suggest_document",
+            })
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from

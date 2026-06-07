@@ -14,7 +14,7 @@ if sys.platform != "win32":
     import pty
     import fcntl
 
-from routes.cookbook_helpers import TMUX_LOG_DIR
+from routes.cookbook_helpers import TMUX_LOG_DIR, windows_powershell_exe
 from typing import Dict, Any
 
 from fastapi import APIRouter, Request, HTTPException
@@ -63,6 +63,24 @@ STREAM_TIMEOUT = 120  # default for short commands
 MAX_OUTPUT = 200_000  # truncate limit
 
 
+def _normalize_shell_command(command: str) -> str:
+    """Resolve bare ``powershell`` on Windows when PATH omits System32."""
+    if sys.platform != "win32":
+        return command
+    stripped = command.lstrip()
+    lower = stripped.lower()
+    for prefix in ("powershell.exe ", "powershell "):
+        if lower.startswith(prefix):
+            ps = windows_powershell_exe()
+            rest = stripped[len(prefix.split()[0]) :].lstrip()
+            if rest.startswith(".exe"):
+                rest = rest[4:].lstrip()
+            return f'"{ps}" {rest}'.strip()
+    if lower in ("powershell", "powershell.exe"):
+        return f'"{windows_powershell_exe()}"'
+    return command
+
+
 class ShellExecRequest(BaseModel):
     command: str
     timeout: int | None = None  # optional override; 0 = no timeout (run until client disconnects)
@@ -72,6 +90,7 @@ class ShellExecRequest(BaseModel):
 
 async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, Any]:
     """Run a shell command and return stdout/stderr/exit_code."""
+    command = _normalize_shell_command(command)
     proc = None
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -350,7 +369,7 @@ def setup_shell_routes() -> APIRouter:
     async def shell_exec(request: Request, req: ShellExecRequest) -> Dict[str, Any]:
         """Execute a shell command and return output. Admin only."""
         _require_admin(request)
-        cmd = req.command.strip()
+        cmd = _normalize_shell_command(req.command.strip())
         if not cmd:
             return {"stdout": "", "stderr": "No command provided", "exit_code": 1}
 
@@ -362,7 +381,7 @@ def setup_shell_routes() -> APIRouter:
     async def shell_stream(request: Request, req: ShellExecRequest):
         """Execute a shell command and stream output line-by-line via SSE. Admin only."""
         _require_admin(request)
-        cmd = req.command.strip()
+        cmd = _normalize_shell_command(req.command.strip())
         if not cmd:
             async def empty():
                 yield f"data: {json.dumps({'stream': 'stderr', 'data': 'No command provided'})}\n\n"

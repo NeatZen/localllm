@@ -337,7 +337,19 @@
     const res = await fetch('/api/auth/status', { credentials: 'same-origin' });
     const data = await res.json();
     if (data.authenticated) {
-      window.location.replace('/');
+      // Cookie can look valid to /api/auth/status while strict routes still
+      // 401 (middleware bypass). Probe a protected route before bouncing home.
+      try {
+        const probe = await fetch('/api/sessions', { credentials: 'same-origin' });
+        if (probe.ok) {
+          window.location.replace('/');
+          return;
+        }
+      } catch (_) {}
+      try {
+        await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+      } catch (_) {}
+      setMode('login');
       return;
     }
     signupAllowed = !!data.signup_enabled;

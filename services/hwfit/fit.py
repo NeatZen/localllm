@@ -5,6 +5,7 @@ from services.hwfit.models import (
     get_models, is_prequantized, _active_params_b, QUANT_BYTES_PER_PARAM,
     QUANT_SPEED_MULT, QUANT_QUALITY_PENALTY,
 )
+from services.hwfit.agent_capable import is_agent_capable, agent_capable_label
 
 GPU_BANDWIDTH = {
     "5090": 1792, "5080": 960, "5070 ti": 896, "5070": 672, "5060 ti": 448, "5060": 256,
@@ -300,6 +301,9 @@ def analyze_model(model, system, target_quant=None):
             "scores": {"quality": 0, "speed": 0, "fit": 0, "context": 0},
             "gguf_sources": model.get("gguf_sources", []),
             "context_length": model.get("context_length", 4096),
+            "capabilities": model.get("capabilities", []),
+            "agent_capable": is_agent_capable(model),
+            "agent_capable_label": agent_capable_label(model),
         }
 
     run_mode, quant, fit_ctx, required_gb = result
@@ -353,6 +357,9 @@ def analyze_model(model, system, target_quant=None):
         },
         "gguf_sources": model.get("gguf_sources", []),
         "context_length": model.get("context_length", 4096),
+        "capabilities": model.get("capabilities", []),
+        "agent_capable": is_agent_capable(model),
+        "agent_capable_label": agent_capable_label(model),
     }
 
 
@@ -365,7 +372,7 @@ SORT_KEYS = {
 }
 
 
-def rank_models(system, use_case=None, limit=50, search=None, sort="score", quant=None):
+def rank_models(system, use_case=None, limit=50, search=None, sort="score", quant=None, agent_only=False):
     """Rank all models against detected hardware. Returns sorted list of fit results."""
     models = get_models()
     results = []
@@ -441,6 +448,9 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
 
         result = analyze_model(m, system, target_quant=quant)
         if result is None:
+            continue
+
+        if agent_only and not result.get("agent_capable"):
             continue
 
         if use_case:

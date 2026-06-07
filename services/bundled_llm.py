@@ -447,6 +447,10 @@ def register_endpoint() -> bool:
         if existing:
             if not existing.is_enabled:
                 existing.is_enabled = True
+            if existing.supports_tools is None:
+                existing.supports_tools = False
+                db.commit()
+            else:
                 db.commit()
             sync_endpoint_models()
             _invalidate_models_cache()
@@ -457,6 +461,7 @@ def register_endpoint() -> bool:
             name=ENDPOINT_NAME,
             base_url=url,
             is_enabled=True,
+            supports_tools=False,
         )
         db.add(ep)
         db.commit()

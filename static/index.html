@@ -656,6 +656,7 @@
     <button class="icon-rail-btn" id="rail-calendar" title="Calendar"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="icon-rail-btn" id="rail-compare" title="Compare"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg></button>
     <button class="icon-rail-btn" id="rail-cookbook" title="Cookbook"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></svg></button>
+    <button class="icon-rail-btn" id="rail-workspace" title="Agent Workspace"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg></button>
     <button class="icon-rail-btn" id="rail-research" title="Deep Research"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>
     <button class="icon-rail-btn" id="rail-email" title="Email"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></button>
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
@@ -847,6 +848,17 @@
           <span class="grow">Cookbook</span>
           <span id="cookbook-bg-status" style="display:none;font-size:9px;opacity:0.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-left:6px;flex-shrink:1;min-width:0;position:relative;top:-1px;"></span>
           <span class="cookbook-notif-dot" id="cookbook-notif-dot" style="display:none;margin-left:6px;margin-right:4px;position:relative;top:-1px;left:0px;"></span>
+        </div>
+        <div class="list-item" id="tool-workspace-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            style="flex-shrink:0;opacity:0.5;">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            <line x1="12" y1="11" x2="12" y2="17"/>
+            <line x1="9" y1="14" x2="15" y2="14"/>
+          </svg>
+          <span class="grow">Workspace</span>
+          <span id="workspace-pending-dot"></span>
         </div>
         <div class="list-item" id="tool-research-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;opacity:0.5;"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
@@ -1298,6 +1310,66 @@
         <button class="close-btn" id="close-cookbook-modal">✖</button>
       </div>
       <div class="modal-body cookbook-body"></div>
+    </div>
+  </div>
+
+  <div id="workspace-modal" class="modal hidden">
+    <div class="modal-content" style="width:min(1200px,96vw);height:92vh;max-height:92vh;background:var(--bg);">
+      <div class="modal-header">
+        <h4 style="margin:0;margin-right:auto"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>Agent Workspace <span id="ws-project-title" style="font-weight:normal;opacity:0.6;font-size:0.85em;margin-left:8px"></span></h4>
+        <button type="button" class="ws-btn" id="ws-open-chat" title="Switch main chat to this project's agent session">Open in Chat</button>
+        <button class="close-btn" id="close-workspace-modal">✖</button>
+      </div>
+      <div class="modal-body workspace-body">
+        <div class="ws-col">
+          <div class="ws-col-head">Projects <button type="button" class="ws-btn" id="ws-new-project" title="New project">+</button></div>
+          <div class="ws-col-body" id="ws-project-list"></div>
+          <div style="padding:4px 6px;border-top:1px solid var(--border);">
+            <button type="button" class="ws-btn" id="ws-delete-project" style="width:100%;opacity:0.7;">Delete project</button>
+          </div>
+        </div>
+        <div class="ws-col ws-col-main">
+          <div class="ws-col-head">Files</div>
+          <div class="ws-col-body ws-files-pane" id="ws-file-tree"></div>
+          <div class="ws-col-head" style="border-top:1px solid var(--border);">Preview</div>
+          <div class="ws-col-body ws-preview-pane"><pre id="ws-file-preview"></pre></div>
+          <div class="ws-col-head ws-chat-head" style="border-top:1px solid var(--border);">
+            <span>Agent chat</span>
+            <div class="model-picker-wrap ws-model-picker-wrap" id="ws-model-picker-wrap">
+              <button type="button" class="model-picker-btn" id="ws-model-picker-btn" title="Agent model"><span id="ws-model-picker-label">Select model</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
+              <div class="model-picker-menu hidden" id="ws-model-picker-menu">
+                <input type="text" id="ws-model-picker-search" placeholder="Search models..." autocomplete="off">
+                <div class="model-picker-list" id="ws-model-picker-list"></div>
+              </div>
+            </div>
+          </div>
+          <div class="ws-col-body ws-chat-pane">
+            <div id="ws-chat-log" class="ws-chat-log"><div class="ws-muted">Tell the agent what to build — it creates files here for you to approve.</div></div>
+            <div class="ws-chat-input-row">
+              <textarea id="ws-chat-input" rows="2" placeholder="e.g. Build a simple index.html landing page…"></textarea>
+              <button type="button" class="ws-btn ws-btn-send" id="ws-chat-send">Send</button>
+            </div>
+          </div>
+        </div>
+        <div class="ws-col">
+          <div class="ws-col-head">Pending changes <button type="button" class="ws-btn ws-btn-approve" id="ws-approve-all">Approve all</button></div>
+          <div class="ws-col-body" id="ws-changes-list"></div>
+          <div class="ws-col-head" style="border-top:1px solid var(--border);">Shortcuts</div>
+          <div class="ws-col-body">
+            <div class="ws-shortcuts">
+              <button type="button" class="ws-btn" id="ws-cmd-build">npm run build</button>
+              <button type="button" class="ws-btn" id="ws-cmd-test">npm test</button>
+              <button type="button" class="ws-btn" id="ws-cmd-dev">npm run dev</button>
+            </div>
+            <div class="ws-browser-row">
+              <input type="text" id="ws-browser-url" placeholder="http://localhost:3000" />
+              <button type="button" class="ws-btn" id="ws-browser-test">Test URL</button>
+            </div>
+          </div>
+          <div class="ws-col-head" style="border-top:1px solid var(--border);">Activity</div>
+          <div class="ws-col-body" id="ws-activity-log"></div>
+        </div>
+      </div>
     </div>
   </div>
 

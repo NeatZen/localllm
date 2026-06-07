@@ -52,14 +52,29 @@ window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
 window.modelsPageModule = modelsPageModule;
+
+/** Lazy-load workspace so a workspace module error cannot block all hub handlers. */
+let _workspaceModule = null;
+async function getWorkspaceModule() {
+  if (!_workspaceModule) {
+    _workspaceModule = await import('./js/workspace.js').then(m => m.default || m);
+    window.workspaceModule = _workspaceModule;
+  }
+  return _workspaceModule;
+}
 window.modelsModule = modelsModule;
 window.refreshModels = () => modelsModule.refreshModels(true);
 
-// Redirect to login on 401 from any fetch
+// Redirect to login on 401 from any fetch (once per page — avoid / ↔ /login loops)
 const _origFetch = window.fetch;
+let _authRedirectPending = false;
 window.fetch = async function(...args) {
   const res = await _origFetch.apply(this, args);
-  if (res.status === 401 && !String(args[0]).includes('/api/auth/')) {
+  const url = String(args[0] || '');
+  if (res.status === 401 && !url.includes('/api/auth/')) {
+    const path = window.location.pathname || '';
+    if (path === '/login' || _authRedirectPending) return res;
+    _authRedirectPending = true;
     window.location.href = '/login';
   }
   return res;
@@ -99,7 +114,8 @@ function initializeEventListeners() {
   // File attachments (inside overflow menu)
   const _overflowAttach = el('overflow-attach-btn');
   if (_overflowAttach) _overflowAttach.addEventListener('click', fileHandlerModule.openPicker);
-  el('file-input').addEventListener('change', (e)=>{
+  const fileInput = el('file-input');
+  if (fileInput) fileInput.addEventListener('change', (e)=>{
     for (const f of e.target.files) fileHandlerModule.addFiles([f]);
     fileHandlerModule.renderAttachStrip();
     // Refocus textarea after file picker closes (mobile keyboard)
@@ -146,39 +162,42 @@ function initializeEventListeners() {
   }
 
   // Scrolling
-  el('chat-history').addEventListener('scroll', uiModule.debounce(() => {
-    const box = el('chat-history');
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-    uiModule.setAutoScroll(atBottom);
-  }, 100));
-  // Close all footer popups immediately on any scroll
-  el('chat-history').addEventListener('scroll', () => {
-    document.querySelectorAll('.ctx-popup, .memory-used-detail, .msg-overflow-menu').forEach(p => p.remove());
-    document.querySelectorAll('.memory-used-pill').forEach(p => { p._openDetail = null; });
-  }, { passive: true });
+  const chatHistScroll = el('chat-history');
+  if (chatHistScroll) {
+    chatHistScroll.addEventListener('scroll', uiModule.debounce(() => {
+      const box = el('chat-history');
+      const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+      uiModule.setAutoScroll(atBottom);
+    }, 100));
+    // Close all footer popups immediately on any scroll
+    chatHistScroll.addEventListener('scroll', () => {
+      document.querySelectorAll('.ctx-popup, .memory-used-detail, .msg-overflow-menu').forEach(p => p.remove());
+      document.querySelectorAll('.memory-used-pill').forEach(p => { p._openDetail = null; });
+    }, { passive: true });
 
-  el('chat-history').addEventListener('wheel', (e) => {
-    // Only disable auto-scroll when user scrolls UP (deltaY < 0)
-    if (e.deltaY < 0) uiModule.setAutoScroll(false);
-  });
-  let _touchThrottled = false;
-  el('chat-history').addEventListener('touchmove', () => {
-    if (_touchThrottled) return;
-    _touchThrottled = true;
-    uiModule.setAutoScroll(false);
-    requestAnimationFrame(() => { _touchThrottled = false; });
-  }, { passive: true });
+    chatHistScroll.addEventListener('wheel', (e) => {
+      // Only disable auto-scroll when user scrolls UP (deltaY < 0)
+      if (e.deltaY < 0) uiModule.setAutoScroll(false);
+    });
+    let _touchThrottled = false;
+    chatHistScroll.addEventListener('touchmove', () => {
+      if (_touchThrottled) return;
+      _touchThrottled = true;
+      uiModule.setAutoScroll(false);
+      requestAnimationFrame(() => { _touchThrottled = false; });
+    }, { passive: true });
 
-  // Internal #session-id links from AI search results
-  el('chat-history').addEventListener('click', (e) => {
-    const link = e.target.closest('a.chat-link');
-    if (!link) return;
-    const href = link.getAttribute('href');
-    if (href && href.startsWith('#') && sessionModule) {
-      e.preventDefault();
-      sessionModule.selectSession(href.slice(1));
-    }
-  });
+    // Internal #session-id links from AI search results
+    chatHistScroll.addEventListener('click', (e) => {
+      const link = e.target.closest('a.chat-link');
+      if (!link) return;
+      const href = link.getAttribute('href');
+      if (href && href.startsWith('#') && sessionModule) {
+        e.preventDefault();
+        sessionModule.selectSession(href.slice(1));
+      }
+    });
+  }
 
   // Export dropdown button
   const exportDlBtn = el('export-dl-btn');
@@ -799,6 +818,23 @@ function initializeEventListeners() {
     });
   }
 
+  // ── Agent Workspace modal toggle ──
+  const toolWorkspaceBtn = el('tool-workspace-btn');
+  if (toolWorkspaceBtn) {
+    toolWorkspaceBtn.addEventListener('click', async () => {
+      try {
+        const workspaceModule = await getWorkspaceModule();
+        const Modals = await import('./js/modalManager.js');
+        if (!Modals.toggle('workspace-modal')) {
+          workspaceModule.open();
+        }
+      } catch (e) {
+        console.error('Workspace open failed:', e);
+        uiModule?.showToast?.(e.message || 'Could not open Workspace', 'error');
+      }
+    });
+  }
+
   // Document library tool button
   const toolDoclibBtn = el('tool-doclib-btn');
   if (toolDoclibBtn) {
@@ -959,6 +995,7 @@ function initializeEventListeners() {
     },
     '/calendar': () => calendarModule && calendarModule.openCalendar(),
     '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
+    '/workspace': () => document.getElementById('tool-workspace-btn')?.click(),
     '/models': () => modelsPageModule?.open?.() || document.getElementById('tool-models-page-btn')?.click(),
     '/email':    () => {
       // Collapse the wide sidebar → icon rail (48px) so the user keeps
@@ -3436,6 +3473,7 @@ function startOdysseusApp() {
     'rail-compare':   'tool-compare-btn',
     'rail-research':  'tool-research-btn',
     'rail-cookbook':   'tool-cookbook-btn',
+    'rail-workspace':  'tool-workspace-btn',
     'rail-archive':   'tool-library-btn',
     'rail-gallery':   'tool-gallery-btn',
     'rail-tasks':     'tool-tasks-btn',
@@ -3966,7 +4004,7 @@ function startOdysseusApp() {
 
   // Section collapse/expand + drag reorder (extracted to js/section-management.js)
   initSectionCollapse(Storage);
-  initSectionDrag(Storage, loadUIVis);
+  initSectionDrag(Storage, window.loadUIVis || (() => ({})));
   
   // Handle drag over and out for individual sections
   const sections = document.querySelectorAll('.section[draggable="true"]');

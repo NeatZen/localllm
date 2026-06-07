@@ -5,8 +5,11 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from fastapi import HTTPException
 from pydantic import BaseModel
@@ -20,6 +23,10 @@ TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
 # HuggingFace repo IDs are <org>/<name>, both alphanumerics plus ._-
 # Rejecting anything else up front closes off shell-interpolation vectors.
 _REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Ollama refs: name, namespace/name, or name:tag (tag may include + for quant variants).
+_OLLAMA_MODEL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)?(?::[A-Za-z0-9._+-]+)?$"
+)
 # Include pattern is a glob: allow typical safe glyphs only.
 _INCLUDE_RE = re.compile(r"^[A-Za-z0-9._\-*?/\[\]]+$")
 # Remote host: user@host (optionally with :port-free hostname parts).
@@ -39,9 +46,25 @@ _LOCAL_DIR_RE = re.compile(r"^~?/[A-Za-z0-9._/-]*$|^~$")
 
 
 def _validate_repo_id(v: str | None) -> str:
+    v = (v or "").strip().rstrip(".")
     if not v or not _REPO_ID_RE.match(v):
         raise HTTPException(400, "Invalid repo_id — must be <org>/<name> using [A-Za-z0-9._-]")
     return v
+
+
+def _validate_ollama_model(v: str | None) -> str:
+    from services.ollama_library import normalize_ollama_model_ref
+
+    try:
+        ref = normalize_ollama_model_ref(v or "")
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid Ollama model reference") from exc
+    if not ref or not _OLLAMA_MODEL_RE.match(ref):
+        raise HTTPException(
+            400,
+            "Invalid Ollama model — use name, namespace/name, or name:tag (e.g. qwen2.5:7b)",
+        )
+    return ref
 
 
 def _validate_include(v: str | None) -> str | None:
@@ -199,6 +222,7 @@ def _validate_serve_cmd(v: str | None) -> str | None:
 
 class ModelDownloadRequest(BaseModel):
     repo_id: str
+    source: str = "hf"  # "hf" or "ollama"
     include: str | None = None  # glob pattern e.g. "*Q4_K_M*"
     hf_token: str | None = None
     env_prefix: str | None = None  # e.g. "source ~/venv/bin/activate"
@@ -320,6 +344,12 @@ def _safe_env_prefix(ep: str | None) -> str | None:
             path = parts[1]
             if any(c in path for c in "\r\n;&|`$<>"):
                 raise HTTPException(400, "Invalid env_prefix")
+            # PowerShell single-quoted paths do not expand ~; use $env:USERPROFILE.
+            if path.startswith("~/") or path.startswith("~\\"):
+                rest = path[2:].replace("\\", "/")
+                return f'& "$env:USERPROFILE/{rest}"'
+            if path == "~":
+                return '& "$env:USERPROFILE"'
             return "& '" + path.replace("'", "''") + "'"
 
         raise HTTPException(400, "Invalid env_prefix")
@@ -341,5 +371,165 @@ def _ssh_ps(host, script_path, port=None):
     return f'ssh {pf}{host} "powershell -ExecutionPolicy Bypass -File {script_path}"'
 
 
+_WINDOWS_POWERSHELL_EXE: str | None = None
+
+
+def windows_powershell_exe() -> str:
+    """Resolve PowerShell for local subprocess launches.
+
+    Odysseus is often started from an IDE or service context where PATH does
+    not include System32, so bare ``powershell.exe`` raises WinError 2.
+    """
+    global _WINDOWS_POWERSHELL_EXE
+    if _WINDOWS_POWERSHELL_EXE:
+        return _WINDOWS_POWERSHELL_EXE
+    if sys.platform != "win32":
+        _WINDOWS_POWERSHELL_EXE = "powershell"
+        return _WINDOWS_POWERSHELL_EXE
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    candidates = [
+        Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        / "PowerShell"
+        / "7"
+        / "pwsh.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
+        / "PowerShell"
+        / "7"
+        / "pwsh.exe",
+    ]
+    for path in candidates:
+        if path.is_file():
+            _WINDOWS_POWERSHELL_EXE = str(path)
+            return _WINDOWS_POWERSHELL_EXE
+    found = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh.exe")
+    if found:
+        _WINDOWS_POWERSHELL_EXE = found
+        return _WINDOWS_POWERSHELL_EXE
+    raise FileNotFoundError(
+        "PowerShell not found. Install Windows PowerShell or add it to PATH."
+    )
+
+
 # Windows session dir — stored in user's temp on the remote
 WIN_SESSION_DIR = "$env:TEMP\\\\odysseus-sessions"
+
+# Most new Ollama library models require a recent CLI (412 if too old).
+OLLAMA_MIN_RECOMMENDED = (0, 30, 0)
+
+
+def parse_ollama_version(text: str) -> tuple[int, int, int] | None:
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def get_local_ollama_version() -> tuple[str | None, tuple[int, int, int] | None]:
+    if not shutil.which("ollama"):
+        return None, None
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["ollama", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=12,
+            errors="replace",
+        )
+        text = (r.stdout or r.stderr or "").strip()
+        return text, parse_ollama_version(text)
+    except Exception:
+        return None, None
+
+
+def ollama_version_outdated(ver: tuple[int, int, int] | None) -> bool:
+    if not ver:
+        return False
+    return ver < OLLAMA_MIN_RECOMMENDED
+
+
+def ollama_pull_ps_block(model_ref: str) -> list[str]:
+    """Run ``ollama pull`` and mirror stderr progress/errors into session stdout log."""
+    q = _ps_squote(model_ref)
+    return [
+        f"$pullOut = & ollama pull '{q}' 2>&1",
+        "$pullOut | ForEach-Object { Write-Host $_ }",
+        'if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)"; exit $LASTEXITCODE }',
+        'Write-Host ""',
+        'Write-Host "DOWNLOAD_OK"',
+    ]
+
+
+def _run_python_script(script_path: Path, timeout: int = 120) -> tuple[bytes, bytes]:
+    import subprocess as sp
+
+    r = sp.run(
+        [sys.executable, str(script_path)],
+        capture_output=True,
+        timeout=timeout,
+        cwd=str(Path.home()),
+    )
+    return r.stdout, r.stderr
+
+
+def _run_shell_command(cmd: str, timeout: int = 120) -> tuple[bytes, bytes]:
+    import subprocess as sp
+
+    r = sp.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        timeout=timeout,
+        cwd=str(Path.home()),
+    )
+    return r.stdout, r.stderr
+
+
+def list_local_ollama_models() -> list[dict[str, Any]]:
+    """Return locally pulled Ollama models for the Serve hub."""
+    if not shutil.which("ollama"):
+        return []
+    import subprocess as sp
+
+    try:
+        r = sp.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            errors="replace",
+        )
+    except Exception:
+        return []
+    if r.returncode != 0:
+        return []
+
+    models: list[dict[str, Any]] = []
+    for line in r.stdout.splitlines()[1:]:
+        text = line.strip()
+        if not text:
+            continue
+        parts = text.split()
+        if not parts:
+            continue
+        name = parts[0]
+        size = "?"
+        for i, token in enumerate(parts):
+            if token in ("GB", "MB", "TB", "KB") and i > 0:
+                size = f"{parts[i - 1]} {token}"
+                break
+        models.append(
+            {
+                "repo_id": name,
+                "size": size,
+                "nb_files": 0,
+                "has_incomplete": False,
+                "status": "ready",
+                "path": "ollama",
+                "source": "ollama",
+                "is_ollama": True,
+            }
+        )
+    return models

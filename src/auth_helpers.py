@@ -3,10 +3,31 @@
 from typing import Optional
 from fastapi import Request, HTTPException
 
+# Must match routes.auth_routes.SESSION_COOKIE
+_SESSION_COOKIE = "odysseus_session"
+
+
+def _user_from_session_cookie(request: Request) -> Optional[str]:
+    """Resolve username from the session cookie when middleware did not set
+    request.state.current_user (AUTH_ENABLED=false, LOCALHOST_BYPASS, etc.)."""
+    try:
+        auth_mgr = getattr(request.app.state, "auth_manager", None)
+        if auth_mgr is None or not getattr(auth_mgr, "is_configured", False):
+            return None
+        token = request.cookies.get(_SESSION_COOKIE)
+        if not token or not auth_mgr.validate_token(token):
+            return None
+        return auth_mgr.get_username_for_token(token)
+    except Exception:
+        return None
+
 
 def get_current_user(request: Request) -> Optional[str]:
     """Get current username from request state (set by auth middleware)."""
-    return getattr(request.state, 'current_user', None)
+    user = getattr(request.state, "current_user", None)
+    if user:
+        return user
+    return _user_from_session_cookie(request)
 
 
 def require_user(request: Request) -> str:

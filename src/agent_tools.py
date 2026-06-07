@@ -53,6 +53,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "read_file", "write_file",
              "search_hf_models", "list_cached_models",
              "list_serve_presets", "serve_preset", "adopt_served_model",
              "list_cookbook_servers",
+             "list_workspace_files", "propose_file_change", "propose_command", "create_workspace_plan",
              # Other tools the agent reaches for that were also missing.
              "edit_image", "trigger_research", "manage_research",
              # Generic loopback to any UI-button endpoint (cookbook,

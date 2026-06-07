@@ -99,6 +99,15 @@ export function _parseServePhase(snapshot) {
   if (flat.includes('Application startup complete')) {
     return { phase: 'ready', status: 'ready' };
   }
+  if (/Uvicorn running on/i.test(flat)) {
+    return { phase: 'ready', status: 'ready' };
+  }
+  if (/Installing llama-cpp-python/i.test(flat)) {
+    return { phase: 'installing deps', status: 'running' };
+  }
+  if (/llama_model_loader|load_tensors|offloading.*layers/i.test(flat)) {
+    return { phase: 'loading model', status: 'running' };
+  }
   // HTTP access logs (e.g. GET /v1/models 200 OK) mean the server is up
   if (/(?:GET|POST)\s+\/[^\s]*\s+HTTP\/[\d.]+"\s*\d{3}/.test(flat)) {
     return { phase: 'idle', status: 'ready' };
@@ -118,7 +127,7 @@ export function _parseServePhase(snapshot) {
     const pct = parseInt(dlMatches[dlMatches.length - 1][1]);
     return { phase: `downloading ${pct}%`, status: 'running', pct };
   }
-  return {};
+  return { phase: 'starting', status: 'running' };
 }
 
 // ── Port auto-increment ──
@@ -412,25 +421,38 @@ function _animateOutThenRemove(el, sessionId) {
 
 // ── tmux / Windows session commands ──
 
+const _WIN_PS_EXE = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+
 function _localWinSessionCmd(task, tmuxArgs) {
-  const sid = task.sessionId;
-  const sd = '$env:TEMP\\odysseus-sessions';
+  const sid = task.sessionId.replace(/'/g, "''");
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
-    const ps = `Get-Content "${sd}\\${sid}.log","${sd}\\${sid}.err.log" -ErrorAction SilentlyContinue | Select-Object -Last ${lines}`;
-    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+      + `$logs = @((Join-Path $sd '${sid}.log'), (Join-Path $sd '${sid}.err.log')); `
+      + `Get-Content $logs -ErrorAction SilentlyContinue | Select-Object -Last ${lines}`;
+    return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('has-session')) {
-    const ps = `$p = Get-Content "${sd}\\${sid}.pid" -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } }; exit 1`;
-    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+      + `$pf = Join-Path $sd '${sid}.pid'; `
+      + `$p = Get-Content $pf -ErrorAction SilentlyContinue; `
+      + `if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } }; exit 1`;
+    return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('kill-session')) {
-    const ps = `$p = Get-Content "${sd}\\${sid}.pid" -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item "${sd}\\${sid}.*" -Force -ErrorAction SilentlyContinue`;
-    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+      + `$pf = Join-Path $sd '${sid}.pid'; `
+      + `$p = Get-Content $pf -ErrorAction SilentlyContinue; `
+      + `if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; `
+      + `Remove-Item (Join-Path $sd '${sid}.*') -Force -ErrorAction SilentlyContinue`;
+    return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('send-keys') && tmuxArgs.includes('C-c')) {
-    const ps = `$p = Get-Content "${sd}\\${sid}.pid" -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }`;
-    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+      + `$pf = Join-Path $sd '${sid}.pid'; `
+      + `$p = Get-Content $pf -ErrorAction SilentlyContinue; `
+      + `if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }`;
+    return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   return `tmux ${tmuxArgs} 2>/dev/null`;
 }
@@ -703,6 +725,40 @@ export function _updateInlineDownloadPanel(statusTasks) {
   el.querySelectorAll('.cookbook-task-wave').forEach((wave) => _registerWaveEl(wave));
 }
 
+function _cleanRepoId(repo) {
+  if (!repo || typeof repo !== 'string') return repo || '';
+  return repo.trim().replace(/\.+$/, '');
+}
+
+function _downloadLooksSuccessful(text) {
+  if (!text || typeof text !== 'string') return false;
+  if (text.includes('DOWNLOAD_FAILED')) return false;
+  if (text.includes('ERROR ')) return false;
+  if (text.includes('DOWNLOAD_OK')) return true;
+  if (/\bDONE\s+\S/.test(text)) return true;
+  if (text.includes('DONE') && text.includes('/snapshots/')) return true;
+  if (/\b100%\s*\d+\/\d+/.test(text)) return true;
+  if (/100%\|/.test(text)) return true;
+  if (/^success\s*$/im.test(text)) return true;
+  return false;
+}
+
+function _fixCompletedDownloadStatus(tasks) {
+  let changed = false;
+  for (const task of tasks) {
+    if (task.type !== 'download') continue;
+    const domOut = document.querySelector(`.cookbook-task[data-task-id="${task.sessionId}"] .cookbook-output-pre`)?.textContent || '';
+    const text = task.output || domOut;
+    if ((task.status === 'crashed' || task.status === 'running' || task.status === 'error') && _downloadLooksSuccessful(text)) {
+      task.status = 'done';
+      if (!task.output && domOut) task.output = domOut;
+      changed = true;
+    }
+  }
+  if (changed) _saveTasks(tasks, true);
+  return changed;
+}
+
 function _hydrateTasksFromStatus(statusTasks) {
   if (!Array.isArray(statusTasks) || !statusTasks.length) return false;
   const localTasks = _loadTasks();
@@ -714,10 +770,14 @@ function _hydrateTasksFromStatus(statusTasks) {
     if (!st || !st.session_id) continue;
 
     const remoteHost = (!st.remote || st.remote === 'local') ? '' : st.remote;
-    const mappedStatus = (st.status === 'completed') ? 'done'
+    let mappedStatus = (st.status === 'completed') ? 'done'
       : (st.status === 'error' || st.status === 'stopped') ? 'crashed'
       : (st.status === 'running' || st.status === 'ready') ? 'running'
       : null;
+    const statusText = st.output_tail || st.progress || '';
+    if (st.type === 'download' && _downloadLooksSuccessful(statusText)) {
+      mappedStatus = 'done';
+    }
 
     if (_isTombstoned(st.session_id)) {
       if (mappedStatus !== 'running') continue;
@@ -738,7 +798,7 @@ function _hydrateTasksFromStatus(statusTasks) {
         remoteHost,
         sshPort: '',
         platform: (!remoteHost && _isWindows()) ? 'windows' : '',
-        payload: { repo_id: st.repo_id || st.model || '' },
+        payload: { repo_id: _cleanRepoId(st.repo_id || st.model || '') },
       };
       localTasks.push(task);
       byId.set(st.session_id, task);
@@ -748,14 +808,25 @@ function _hydrateTasksFromStatus(statusTasks) {
     }
 
     if (mappedStatus && task.status !== mappedStatus) {
-      task.status = mappedStatus;
-      changed = true;
+      // Don't downgrade a finished download because the background PID exited.
+      if (task.status === 'done' && mappedStatus === 'crashed') {
+        /* keep done */
+      } else if (task.type === 'download' && mappedStatus === 'crashed' && _downloadLooksSuccessful(task.output || statusText)) {
+        task.status = 'done';
+        changed = true;
+      } else {
+        task.status = mappedStatus;
+        changed = true;
+      }
     }
     if (task.status === 'running') {
       const nextOut = st.output_tail || st.progress || '';
       if (nextOut && task.output !== nextOut) {
         task.output = nextOut;
         changed = true;
+        if (_downloadLooksSuccessful(nextOut)) {
+          task.status = 'done';
+        }
       }
     }
   }
@@ -877,10 +948,39 @@ async function _retryTask(el, task) {
 
 async function _retryDownload(name, payload) {
   try {
+    const targetHost = payload?.remote_host || payload?.remoteHost || 'local';
+    const tasks = _loadTasks();
+    const activeOnHost = tasks.find(
+      t => t.type === 'download'
+        && (t.status === 'running' || t.status === 'queued')
+        && (t.remoteHost || 'local') === targetHost
+    );
+    if (activeOnHost) {
+      const queueId = `queue-${Date.now().toString(36)}`;
+      tasks.push({
+        id: queueId,
+        sessionId: queueId,
+        name,
+        type: 'download',
+        status: 'queued',
+        output: '',
+        ts: Date.now(),
+        payload,
+        remoteHost: targetHost === 'local' ? '' : targetHost,
+      });
+      _saveTasks(tasks);
+      _renderRunningTab();
+      uiModule.showToast(`Queued ${name} — waiting for current download`);
+      return;
+    }
     // A retry means the fast hf_transfer path already failed once — fall back to
     // the plain, reliable downloader for this and any further attempt (it resumes
     // from the cached .incomplete files, so no progress is lost).
-    const _payload = { ...(payload || {}), disable_hf_transfer: true };
+    const _payload = { ...(payload || {}) };
+    if (_payload.repo_id) _payload.repo_id = _cleanRepoId(_payload.repo_id);
+    if ((_payload.source || 'hf') !== 'ollama') {
+      _payload.disable_hf_transfer = true;
+    }
     const res = await fetch('/api/model/download', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
@@ -1234,7 +1334,7 @@ export async function _launchServeTask(shortName, repo, cmd, fields, hostOverrid
     env_prefix: envPrefix || undefined,
     hf_token: _envState.hfToken || undefined,
     gpus: _envState.gpus || undefined,
-    platform: _hplatform || undefined,
+    platform: _host ? (_hplatform || undefined) : (_isWindows() ? 'windows' : (_hplatform || undefined)),
   };
 
   try {
@@ -1314,6 +1414,7 @@ export function _renderRunningTab() {
   });
 
   const tasks = _loadTasks();
+  _fixCompletedDownloadStatus(tasks);
   const hasContent = tasks.length > 0;
 
   let tabBar = body.querySelector('.cookbook-tabs');
@@ -2098,7 +2199,7 @@ async function _reconnectTask(el, task) {
           if (badge) { badge.textContent = _statusLabel('error', task.type); badge.className = 'cookbook-task-status cookbook-task-error'; }
           _showCookbookNotif(true);
         } else {
-          const looksSuccessful = !lastOutput.includes('DOWNLOAD_FAILED') && (lastOutput.includes('DONE') || lastOutput.includes('100%') || lastOutput.includes('Application startup complete') || lastOutput.includes('/snapshots/') || lastOutput.includes('Download complete') || lastOutput.includes('DOWNLOAD_OK'));
+          const looksSuccessful = _downloadLooksSuccessful(lastOutput);
           if (!lastOutput.trim() || (task.type === 'download' && !looksSuccessful)) {
             _updateTask(task.sessionId, { status: 'crashed' });
             el.dataset.status = 'crashed';
@@ -2124,6 +2225,10 @@ async function _reconnectTask(el, task) {
       if (snapshot) {
         output.textContent = snapshot;
         output.scrollTop = output.scrollHeight;
+        if (task.output !== snapshot) {
+          task.output = snapshot;
+          _updateTask(task.sessionId, { output: snapshot });
+        }
 
         // Live status parsing for download tasks
         if (task.type === 'download') {
@@ -2190,7 +2295,7 @@ async function _reconnectTask(el, task) {
                 // is preserved — rebuilding from task.repo/task.name drops the org prefix.
                 const dlPayload = task.payload
                   ? { ...task.payload }
-                  : { repo_id: task.repo || task.name, remote_host: task.remoteHost || '' };
+                  : { repo_id: _cleanRepoId(task.repo || task.name), remote_host: task.remoteHost || '' };
                 if (_envState.hfToken) dlPayload.hf_token = _envState.hfToken;
                 // Stalled with hf_transfer — restart on the reliable downloader.
                 dlPayload.disable_hf_transfer = true;
@@ -2252,7 +2357,10 @@ async function _reconnectTask(el, task) {
               badge.textContent = 'finishing';
               badge.className = 'cookbook-task-status cookbook-task-running';
             }
-            if (snapshot.includes('DOWNLOAD_FAILED')) {
+            if (snapshot.includes('DOWNLOAD_FAILED') && !snapshot.includes('DOWNLOAD_OK')) {
+              const _ollamaPullFailed = /pull model manifest|file does not exist|Error:\s*pull/i.test(snapshot);
+              const _isOllamaDl = task.payload?.source === 'ollama';
+              const _ollamaErr = snapshot.match(/Error:\s*(.+)/i);
               // The wrapper prints DOWNLOAD_FAILED but exits 0, and per-file
               // "Download complete"/"100%" lines make it look successful — so
               // catch the explicit failure marker and handle it.
@@ -2262,7 +2370,8 @@ async function _reconnectTask(el, task) {
               const _accessDenied = /Access to model.*is restricted|gated repo|GatedRepoError|401 Unauthorized|403 Forbidden|not in the authorized list|awaiting a review|must (?:be authenticated|have access)/i.test(snapshot);
               const _dlKey = task.payload?.repo_id || task.name;
               const _dlN = _dlRetryCount.get(_dlKey) || 0;
-              if (!_accessDenied && task.type === 'download' && task.payload && _dlN < _DL_MAX_AUTO_RETRY) {
+              const _alreadyReliable = !!(task.payload && task.payload.disable_hf_transfer);
+              if (!_accessDenied && !_ollamaPullFailed && task.type === 'download' && task.payload && _dlN < _DL_MAX_AUTO_RETRY && !_alreadyReliable) {
                 // Auto-retry: kill the dead session and re-launch (resumes from
                 // the cached .incomplete files) after a short delay.
                 _dlRetryCount.set(_dlKey, _dlN + 1);
@@ -2283,13 +2392,15 @@ async function _reconnectTask(el, task) {
               }
               // Out of auto-retries (or not a download) — surface the error; the
               // card's Retry button stays available to resume manually.
+              if (_isOllamaDl && _ollamaErr) {
+                uiModule.showToast(`Ollama pull failed: ${_ollamaErr[1].trim()}`, 10000);
+              }
               badge.textContent = _statusLabel('error', task.type);
               badge.className = 'cookbook-task-status cookbook-task-error';
               _updateTask(task.sessionId, { status: 'error' });
               el.dataset.status = 'error';
-              // Explain a gated/access failure with actionable buttons (request
-              // access on HF, check token) — otherwise it's just raw red text.
-              if (_accessDenied) {
+              // Explain failures with actionable diagnosis when we recognize them.
+              if (_accessDenied || _isOllamaDl) {
                 const _diag = _diagnose(snapshot);
                 if (_diag) {
                   let diagEl = el.querySelector('.cookbook-diagnosis');
@@ -2300,7 +2411,7 @@ async function _reconnectTask(el, task) {
               _showCookbookNotif(true);
               break;
             }
-            if (snapshot.includes('DOWNLOAD_OK') || (snapshot.includes('/snapshots/') && completed >= totalFiles && totalFiles > 0)) {
+            if (_downloadLooksSuccessful(snapshot)) {
               _dlRetryCount.delete(task.payload?.repo_id || task.name);
               badge.textContent = _statusLabel('done', task.type);
               badge.className = 'cookbook-task-status cookbook-task-done';

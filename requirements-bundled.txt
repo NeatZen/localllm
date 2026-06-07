@@ -1,6 +1,12 @@
-# Turnkey local AI — built-in llama.cpp server (no Ollama required).
-# Windows: use Python 3.12 venv. GPU: install-gpu.ps1 (cu132 wheel). CPU: install-turnkey.ps1 (cpu wheel).
-# Avoid 0.3.26 on Windows (model load crash 0xc000001d). 0.3.25 is stable with GPU on RTX + CUDA 13.x.
-
-llama-cpp-python==0.3.25
-starlette-context>=0.3.6
+# Turnkey local AI — built-in llama.cpp server (no Ollama required).
+
+# Windows: use Python 3.12 venv. GPU: install-gpu.ps1 (cu132 wheel). CPU: install-turnkey.ps1 (cpu wheel).
+
+# Avoid 0.3.26 on Windows (model load crash 0xc000001d). 0.3.25 is stable with GPU on RTX + CUDA 13.x.
+
+
+
+llama-cpp-python==0.3.25
+
+starlette-context>=0.3.6
+
