@@ -182,6 +182,8 @@ async def start_download(model_id: str) -> dict[str, Any]:
 
     try:
         await asyncio.to_thread(_download_sync, model_id, entry)
+        bundled_llm.sync_endpoint_models()
+        bundled_llm._invalidate_models_cache()
         return {"ok": True, **get_hub_status()}
     finally:
         _running.discard(model_id)
@@ -210,7 +212,40 @@ async def activate_model(model_id: str) -> dict[str, Any]:
     ok = await bundled_llm.start_server()
     if ok:
         bundled_llm.register_endpoint()
+    else:
+        bundled_llm.sync_endpoint_models()
+        bundled_llm._invalidate_models_cache()
 
+    return {
+        "ok": ok,
+        "active": bundled_llm.get_active_model_config(),
+        **bundled_llm.get_status(),
+    }
+
+
+async def activate_model_by_path(model_path: str) -> dict[str, Any]:
+    """Switch bundled AI to an installed model by its picker path/id."""
+    filename = Path(model_path).name
+    if not filename.lower().endswith(".gguf"):
+        return {"ok": False, "error": "Invalid model path"}
+
+    for entry in _catalog_models():
+        if str(entry.get("file", "")).lower() == filename.lower():
+            return await activate_model(str(entry["id"]))
+
+    dest = bundled_llm.models_dir() / filename
+    if not bundled_llm.is_model_downloaded_at(dest):
+        return {"ok": False, "error": "Model not downloaded yet"}
+
+    bundled_llm.set_active_model_config(
+        model_id=filename,
+        repo="",
+        file=filename,
+    )
+    bundled_llm.stop_server()
+    ok = await bundled_llm.start_server()
+    if ok:
+        bundled_llm.register_endpoint()
     return {
         "ok": ok,
         "active": bundled_llm.get_active_model_config(),

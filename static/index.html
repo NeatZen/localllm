@@ -773,6 +773,10 @@
       <div class="section" id="models-section">
         <div class="section-header-flex">
           <span class="section-title"> Models</span>
+          <div style="display:flex;gap:4px;align-items:center;">
+          <button type="button" class="section-header-btn" id="models-page-browse-btn" title="Discover models for your hardware">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </button>
           <div style="position:relative; display:inline-block;">
             <button type="button" class="section-header-btn" id="model-sort-btn" title="Sort models">
               <svg class="sort-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -789,6 +793,7 @@
                 &#8593;&#8595; Rearrange <span class="rearrange-check" style="float:right; opacity:0;">&#x2022;</span>
               </div>
             </div>
+          </div>
           </div>
         </div>
         <div id="models">
@@ -827,6 +832,10 @@
         <div class="list-item" id="tool-compare-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/></svg>
           <span class="grow">Compare</span>
+        </div>
+        <div class="list-item" id="tool-models-page-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;opacity:0.5;"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+          <span class="grow">Model Finder</span>
         </div>
         <div class="list-item" id="tool-cookbook-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -1270,6 +1279,18 @@
 
 
   <!-- Cookbook Modal -->
+  <div id="models-page-modal" class="modal hidden">
+    <div class="modal-content models-page-modal-content" style="width: min(820px, 94vw); height: 92vh; max-height: 92vh; background: var(--bg);">
+      <div class="modal-header">
+        <h4 style="margin:0;margin-right:auto"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>Model Finder</h4>
+        <button class="close-btn">✖</button>
+      </div>
+      <div class="modal-body models-page-body" id="models-page-content">
+        <div class="models-page-loading">Loading…</div>
+      </div>
+    </div>
+  </div>
+
   <div id="cookbook-modal" class="modal hidden">
     <div class="modal-content" style="width: min(780px, 92vw); height: 94vh; max-height: 94vh; background: var(--bg);">
       <div class="modal-header">

@@ -17,7 +17,7 @@ import {
   _tmuxCmd, _renderRunningTab, _clearCookbookNotif,
   _launchServeTask, _serveAutoFix, _serveAutoRetry, _serveAutoRetryReplace, _serveAutoRetryRemove,
   _startBackgroundMonitor, _syncFromServer,
-  _retryDownload, _nextAvailablePort, _processQueue,
+  _retryDownload, _nextAvailablePort, _processQueue, _refreshDownloadUI,
 } from './cookbookRunning.js';
 
 import {
@@ -166,9 +166,23 @@ export function _getPlatform(hostOrTask) {
   return srv?.platform || '';
 }
 
+/** True when the browser is running on Windows (local UI only). */
+export function _isBrowserWindows() {
+  return /Win/i.test(navigator.userAgent || navigator.platform || '');
+}
+
 /** Check if the current active server is Windows */
 export function _isWindows(hostOrTask) {
-  return _getPlatform(hostOrTask) === 'windows';
+  if (hostOrTask && typeof hostOrTask === 'object') {
+    if (hostOrTask.platform === 'windows') return true;
+    if (hostOrTask.remoteHost) return _getPlatform(hostOrTask.remoteHost) === 'windows';
+    if (_getPlatform('') === 'windows') return true;
+    return _isBrowserWindows();
+  }
+  if (_getPlatform(hostOrTask) === 'windows') return true;
+  const host = typeof hostOrTask === 'string' ? hostOrTask : '';
+  if (!host && !_envState.remoteHost) return _isBrowserWindows();
+  return false;
 }
 
 /** Detect model-specific vLLM optimizations */
@@ -1003,7 +1017,7 @@ function _wireTabEvents(body) {
       if (!m) return { repo: raw, include: null };
       return { repo: m[1], include: `*${m[2]}*` };
     }
-    const triggerDownload = () => {
+    const triggerDownload = async () => {
       const rawRepo = _stripHfUrl(dlInput.value);
       if (!rawRepo) return;
       const { repo, include: autoInclude } = _splitRepoTag(rawRepo);
@@ -1033,8 +1047,11 @@ function _wireTabEvents(body) {
       if (_envState.hfToken) payload.hf_token = _envState.hfToken;
       if (host) { payload.remote_host = host; const _sp3 = _getPort(host); if (_sp3) payload.ssh_port = _sp3; }
       const srvPlatform = _getPlatform(host);
-      if (srvPlatform) payload.platform = srvPlatform;
-      if (srvPlatform === 'windows') {
+      const isLocal = !host;
+      const isWin = isLocal ? _isWindows() : (srvPlatform === 'windows');
+      if (isWin) payload.platform = 'windows';
+      else if (srvPlatform) payload.platform = srvPlatform;
+      if (isWin) {
         if (env === 'venv' && envPath) {
           payload.env_prefix = '& ' + _psQuote(envPath.endsWith('\\Scripts\\Activate.ps1') ? envPath : envPath + '\\Scripts\\Activate.ps1');
         } else if (env === 'conda' && envPath) {
@@ -1049,7 +1066,13 @@ function _wireTabEvents(body) {
         }
       }
       const shortName = repo.split('/').pop();
-      _retryDownload(shortName, payload);
+      dlBtn.disabled = true;
+      uiModule.showToast(`Starting download: ${shortName}...`);
+      try {
+        await _retryDownload(shortName, payload);
+      } finally {
+        dlBtn.disabled = false;
+      }
       dlInput.value = '';
     };
     dlBtn.addEventListener('click', triggerDownload);
@@ -1321,6 +1344,7 @@ function _renderRecipes() {
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
   html += '<h2 style="margin:0;padding:0;line-height:1;">Download</h2>';
   html += '</div>';
+  html += '<div id="cookbook-active-downloads" class="cookbook-active-downloads" style="display:none;"></div>';
   html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Download from <a href="https://huggingface.co/models" target="_blank" rel="noopener" style="color:var(--accent,var(--red));text-decoration:none;"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:1px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>HuggingFace</a> by pasting model link, or download directly in the Scan section below.</p>';
   html += '<div class="hwfit-container" id="hwfit-container">';
 
@@ -1531,6 +1555,9 @@ function _renderRecipes() {
   // Auto-init What Fits
   _hwfitInit();
   _hwfitFetch();
+  // Rebuild the Running tab after the body wipe (tasks live in localStorage).
+  _renderRunningTab();
+  _refreshDownloadUI();
 }
 
 // ── Public API ──
@@ -1655,6 +1682,7 @@ export async function open(opts) {
   _rendered = true;
   _clearCookbookNotif();
   _renderRunningTab();
+  _refreshDownloadUI();
   if (_content) {
     // Put the panel in its entering state before it becomes visible. On
     // mobile, showing first and adding the class a frame later can paint the

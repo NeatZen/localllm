@@ -291,6 +291,14 @@ function _tombstoneTask(id) {
   for (const k in tomb) { if (now - tomb[k] > _TOMBSTONE_TTL_MS) delete tomb[k]; }
   localStorage.setItem(_REMOVED_KEY, JSON.stringify(tomb));
 }
+function _clearTombstone(id) {
+  if (!id) return;
+  const tomb = _loadTombstones();
+  if (tomb[id]) {
+    delete tomb[id];
+    localStorage.setItem(_REMOVED_KEY, JSON.stringify(tomb));
+  }
+}
 function _isTombstoned(id) {
   const ts = _loadTombstones()[id];
   return ts != null && (Date.now() - ts) <= _TOMBSTONE_TTL_MS;
@@ -317,16 +325,17 @@ function _stripStateSecrets(state) {
   return safe;
 }
 
-export function _saveTasks(tasks) {
+export function _saveTasks(tasks, immediate = false) {
   localStorage.setItem(TASKS_KEY, JSON.stringify((tasks || []).map(_stripTaskSecrets)));
-  _syncToServer();
+  _syncToServer(immediate);
 }
 
 export function _addTask(sessionId, name, type, payload) {
   let tasks = _loadTasks();
   const remoteHost = (payload && payload.remote_host) || _envState.remoteHost || '';
   const sshPort = (payload && payload.ssh_port) || _getPort(remoteHost) || '';
-  const platform = (payload && payload.platform) || _getPlatform(remoteHost) || '';
+  let platform = (payload && payload.platform) || _getPlatform(remoteHost) || '';
+  if (!platform && !remoteHost && _isWindows()) platform = 'windows';
   // Serving a model supersedes its finished download — clear the matching
   // finished download card (covers serving directly from the Serve tab, not just
   // via the download card's "Serve →" button).
@@ -334,22 +343,31 @@ export function _addTask(sessionId, name, type, payload) {
     const _repoId = payload.repo_id;
     tasks = tasks.filter(t => !(t.type === 'download' && t.status === 'done' && t.payload && t.payload.repo_id === _repoId));
   }
-  const task = _stripTaskSecrets({ id: sessionId, sessionId, name, type, status: 'running', output: '', ts: Date.now(), payload: payload || null, remoteHost, sshPort, platform });
-  tasks.push(task);
-  _saveTasks(tasks);
+  const taskData = _stripTaskSecrets({
+    id: sessionId, sessionId, name, type, status: 'running', output: '',
+    ts: Date.now(), payload: payload || null, remoteHost, sshPort, platform,
+  });
+  const existing = tasks.find(t => t.sessionId === sessionId);
+  if (existing) Object.assign(existing, taskData);
+  else tasks.push(taskData);
+  _saveTasks(tasks, true);
+  // Show progress immediately — do not wait for the status poll.
+  _updateInlineDownloadPanel([{
+    session_id: sessionId,
+    type: 'download',
+    status: 'running',
+    model: name,
+    progress: 'starting...',
+  }]);
   // New action → collapse all other cards, leave only this one open.
   _soloExpandTaskId = sessionId;
   _renderRunningTab();
   // Always start the background monitor when a task is added — works even
   // when modal is closed and ensures the sidebar shows live status immediately
   _startBackgroundMonitor();
-  // Switch to Running tab
-  const body = document.querySelector('#cookbook-modal .cookbook-body');
-  if (body) {
-    const tab = body.querySelector('.cookbook-tab[data-backend="Running"]');
-    if (tab) tab.click();
-  }
-  return task;
+  // Switch to Running tab (deferred so the tab/group exist after render)
+  setTimeout(_showRunningTab, 0);
+  return existing || taskData;
 }
 
 function _updateTask(sessionId, updates) {
@@ -377,7 +395,7 @@ function _updateTask(sessionId, updates) {
 export function _removeTask(sessionId) {
   _tombstoneTask(sessionId);  // so sync/poll can't resurrect it
   const tasks = _loadTasks().filter(t => t.sessionId !== sessionId);
-  _saveTasks(tasks);
+  _saveTasks(tasks, true);
   _renderRunningTab();
 }
 
@@ -394,7 +412,33 @@ function _animateOutThenRemove(el, sessionId) {
 
 // ── tmux / Windows session commands ──
 
+function _localWinSessionCmd(task, tmuxArgs) {
+  const sid = task.sessionId;
+  const sd = '$env:TEMP\\odysseus-sessions';
+  if (tmuxArgs.includes('capture-pane')) {
+    const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
+    const ps = `Get-Content "${sd}\\${sid}.log","${sd}\\${sid}.err.log" -ErrorAction SilentlyContinue | Select-Object -Last ${lines}`;
+    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+  }
+  if (tmuxArgs.includes('has-session')) {
+    const ps = `$p = Get-Content "${sd}\\${sid}.pid" -ErrorAction SilentlyContinue; if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } }; exit 1`;
+    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+  }
+  if (tmuxArgs.includes('kill-session')) {
+    const ps = `$p = Get-Content "${sd}\\${sid}.pid" -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item "${sd}\\${sid}.*" -Force -ErrorAction SilentlyContinue`;
+    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+  }
+  if (tmuxArgs.includes('send-keys') && tmuxArgs.includes('C-c')) {
+    const ps = `$p = Get-Content "${sd}\\${sid}.pid" -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }`;
+    return `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`;
+  }
+  return `tmux ${tmuxArgs} 2>/dev/null`;
+}
+
 export function _tmuxCmd(task, tmuxArgs) {
+  if (!task.remoteHost && _isWindows(task)) {
+    return _localWinSessionCmd(task, tmuxArgs);
+  }
   if (_isWindows(task)) {
     return _winSessionCmd(task, tmuxArgs);
   }
@@ -430,6 +474,9 @@ function _winSessionCmd(task, tmuxArgs) {
 }
 
 function _tmuxGracefulKill(task) {
+  if (!task.remoteHost && _isWindows(task)) {
+    return _localWinSessionCmd(task, 'kill-session -t ' + task.sessionId);
+  }
   if (_isWindows(task)) {
     const sd = '$env:TEMP\\odysseus-sessions';
     const sid = task.sessionId;
@@ -587,11 +634,11 @@ function _autoSaveWorkingConfig(task) {
 // ── Cross-device sync ──
 
 let _syncTimer = null;
-function _syncToServer() {
+function _syncToServer(immediate = false) {
   // Debounce to coalesce bursts of writes, but keep latency low so the server
   // is effectively authoritative across devices
   clearTimeout(_syncTimer);
-  _syncTimer = setTimeout(async () => {
+  const run = async () => {
     try {
       // Don't push a not-yet-hydrated state. A legit state always has at
       // least the "Local" server, so an empty servers list means we loaded
@@ -612,7 +659,124 @@ function _syncToServer() {
         body: JSON.stringify(_stripStateSecrets(state)),
       });
     } catch {}
-  }, 400);
+  };
+  if (immediate) run();
+  else _syncTimer = setTimeout(run, 400);
+}
+
+function _showRunningTab() {
+  const modal = document.getElementById('cookbook-modal');
+  if (!modal || modal.classList.contains('hidden')) return;
+  const body = modal.querySelector('.cookbook-body');
+  if (!body) return;
+  const tab = body.querySelector('.cookbook-tab[data-backend="Running"]');
+  if (!tab) return;
+  tab.click();
+}
+
+export function _updateInlineDownloadPanel(statusTasks) {
+  const el = document.getElementById('cookbook-active-downloads');
+  if (!el) return;
+  const active = (statusTasks || []).filter(
+    t => t && t.type === 'download' && (t.status === 'running' || t.status === 'ready'),
+  );
+  if (!active.length) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  el.style.display = '';
+  el.innerHTML = active.map((t) => {
+    const pct = (t.progress || '').match(/(\d+)%/);
+    const label = pct ? `${t.model} — ${pct[0]}` : `${t.model} — downloading`;
+    return `<div class="cookbook-inline-dl-item">
+      <span class="cookbook-task-wave"></span>
+      <span class="cookbook-inline-dl-label">${esc(label)}</span>
+      <button type="button" class="cookbook-btn cookbook-inline-dl-view" data-view-running="1">View progress</button>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('[data-view-running]').forEach((btn) => {
+    if (btn._bound) return;
+    btn._bound = true;
+    btn.addEventListener('click', () => _showRunningTab());
+  });
+  el.querySelectorAll('.cookbook-task-wave').forEach((wave) => _registerWaveEl(wave));
+}
+
+function _hydrateTasksFromStatus(statusTasks) {
+  if (!Array.isArray(statusTasks) || !statusTasks.length) return false;
+  const localTasks = _loadTasks();
+  const byId = new Map(localTasks.map(t => [t.sessionId, t]));
+  let changed = false;
+  let addedNew = false;
+
+  for (const st of statusTasks) {
+    if (!st || !st.session_id) continue;
+
+    const remoteHost = (!st.remote || st.remote === 'local') ? '' : st.remote;
+    const mappedStatus = (st.status === 'completed') ? 'done'
+      : (st.status === 'error' || st.status === 'stopped') ? 'crashed'
+      : (st.status === 'running' || st.status === 'ready') ? 'running'
+      : null;
+
+    if (_isTombstoned(st.session_id)) {
+      if (mappedStatus !== 'running') continue;
+      _clearTombstone(st.session_id);
+    }
+
+    let task = byId.get(st.session_id);
+    if (!task) {
+      if (mappedStatus !== 'running') continue;
+      task = {
+        id: st.session_id,
+        sessionId: st.session_id,
+        name: st.model || st.session_id,
+        type: st.type || 'download',
+        status: 'running',
+        output: st.output_tail || st.progress || '',
+        ts: Date.now(),
+        remoteHost,
+        sshPort: '',
+        platform: (!remoteHost && _isWindows()) ? 'windows' : '',
+        payload: { repo_id: st.repo_id || st.model || '' },
+      };
+      localTasks.push(task);
+      byId.set(st.session_id, task);
+      changed = true;
+      addedNew = true;
+      continue;
+    }
+
+    if (mappedStatus && task.status !== mappedStatus) {
+      task.status = mappedStatus;
+      changed = true;
+    }
+    if (task.status === 'running') {
+      const nextOut = st.output_tail || st.progress || '';
+      if (nextOut && task.output !== nextOut) {
+        task.output = nextOut;
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    _saveTasks(localTasks, true);
+    _renderRunningTab();
+    if (addedNew) _showRunningTab();
+  }
+  return changed;
+}
+
+export async function _refreshDownloadUI() {
+  try {
+    const res = await fetch('/api/cookbook/tasks/status', { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const tasks = data.tasks || [];
+    _hydrateTasksFromStatus(tasks);
+    _updateInlineDownloadPanel(tasks);
+  } catch (_) { /* non-fatal */ }
 }
 
 // Normalize state from server: collapse legacy duplicate keys to canonical form.
@@ -733,6 +897,15 @@ async function _retryDownload(name, payload) {
     }
     _addTask(data.session_id, name, 'download', payload);
     uiModule.showToast(`Downloading ${name}...`);
+    try {
+      const stRes = await fetch('/api/cookbook/tasks/status', { credentials: 'same-origin' });
+      if (stRes.ok) {
+        const stData = await stRes.json();
+        const statusTasks = stData.tasks || [];
+        _hydrateTasksFromStatus(statusTasks);
+        _updateInlineDownloadPanel(statusTasks);
+      }
+    } catch (_) { /* non-fatal */ }
   } catch (e) {
     uiModule.showToast('Download failed: ' + e.message);
   }
@@ -2531,7 +2704,9 @@ async function _pollBackgroundStatus() {
           }
           if (added > 0) {
             localStorage.setItem(TASKS_KEY, JSON.stringify(merged.map(_stripTaskSecrets)));
+            _syncToServer(true);
             _renderRunningTab();
+            _showRunningTab();
           }
         }
       }
@@ -2541,6 +2716,8 @@ async function _pollBackgroundStatus() {
     if (!res.ok) return;
     const data = await res.json();
     const tasks = data.tasks || [];
+    _hydrateTasksFromStatus(tasks);
+    _updateInlineDownloadPanel(tasks);
 
     const statusEl = document.getElementById('cookbook-bg-status');
     const activeTasks = tasks.filter(t => t.status === 'running' || t.status === 'ready');
@@ -2700,4 +2877,4 @@ export function initRunning(shared) {
 }
 
 // Also export _retryDownload and _nextAvailablePort for use by other modules
-export { _retryDownload, _nextAvailablePort, _processQueue };
+export { _retryDownload, _nextAvailablePort, _processQueue, _showRunningTab };

@@ -143,7 +143,8 @@ function bindActions() {
         await postAction('/api/model-hub/download', modelId);
       } else {
         await postAction('/api/model-hub/activate', modelId);
-        if (typeof window.refreshModels === 'function') window.refreshModels();
+        if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+        if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
       }
       await refresh();
     } catch (err) {

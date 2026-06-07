@@ -535,6 +535,10 @@ app.include_router(setup_bundled_llm_routes())
 from routes.model_hub_routes import setup_model_hub_routes
 app.include_router(setup_model_hub_routes())
 
+# Models discovery page (hardware fit + trending)
+from routes.models_page_routes import setup_models_page_routes
+app.include_router(setup_models_page_routes())
+
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())

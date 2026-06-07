@@ -110,7 +110,7 @@ function _initModelPickerDropdown() {
         seen.add(mid);
         result.push({
           mid,
-          display: (allDisplay[i] || mid).split('/').pop(),
+          display: (allDisplay[i] || mid).split(/[/\\]/).pop(),
           url: item.url,
           endpointId: item.endpoint_id,
           epName: item.endpoint_name || '',
@@ -197,9 +197,46 @@ function _initModelPickerDropdown() {
     }
   }
 
+  function _isBundledEndpoint(m) {
+    return (m.epName || '').toLowerCase().includes('built-in ai')
+      || (m.url || '').includes(':11435');
+  }
+
+  async function _maybeActivateBundledModel(m) {
+    if (!_isBundledEndpoint(m)) return true;
+    try {
+      const statusRes = await fetch('/api/model-hub/status', { credentials: 'same-origin' });
+      if (!statusRes.ok) return true;
+      const hub = await statusRes.json();
+      const activeFile = (hub.active?.file || '').toLowerCase();
+      const pickedFile = m.mid.split(/[/\\]/).pop().toLowerCase();
+      if (!pickedFile || activeFile === pickedFile) return true;
+
+      uiModule.showToast(`Switching to ${m.display}...`);
+      const actRes = await fetch('/api/model-hub/activate-by-path', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: m.mid }),
+      });
+      const act = await actRes.json().catch(() => ({}));
+      if (!actRes.ok || !act.ok) {
+        uiModule.showError(act.error || 'Failed to switch built-in model');
+        return false;
+      }
+      if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+      return true;
+    } catch (e) {
+      console.warn('Bundled model switch failed:', e);
+      return true;
+    }
+  }
+
   async function _pick(m) {
     const currentSessionId = _deps.getCurrentSessionId();
     const _pendingChat = _deps.getPendingChat();
+
+    if (!(await _maybeActivateBundledModel(m))) return;
 
     // Broadcast immediately so listeners (e.g. the tour) can advance without
     // waiting for the async session-create/PATCH that follows.
@@ -339,7 +376,7 @@ export function updateModelPicker() {
     }
   }
 
-  const displayName = modelId ? modelId.split('/').pop() : 'Select model';
+  const displayName = modelId ? modelId.split(/[/\\]/).pop() : 'Select model';
   const logo = modelId ? providerLogo(modelId) : null;
   if (logo) {
     label.innerHTML = '<span class="model-picker-logo">' + logo + '</span> ' + displayName;

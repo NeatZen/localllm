@@ -6,6 +6,7 @@ import json
 import time as _time
 import logging
 import httpx
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request
@@ -310,7 +311,22 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
     return []
 
 
+_invalidate_models_cache_cb = None
+
+
+def invalidate_models_cache() -> None:
+    """Clear the /api/models response cache (callable from other services)."""
+    if _invalidate_models_cache_cb is not None:
+        _invalidate_models_cache_cb()
+
+
+def _model_display_name(model_id: str) -> str:
+    """Friendly label for a model id (handles Windows path separators)."""
+    return Path(str(model_id).replace("\\", "/")).name
+
+
 def setup_model_routes(model_discovery):
+    global _invalidate_models_cache_cb
     router = APIRouter(prefix="/api")
 
     # ---- Model list cache ----
@@ -327,6 +343,8 @@ def setup_model_routes(model_discovery):
         affects the visible endpoint list (CRUD on ModelEndpoint, prefs
         flip)."""
         _models_cache.clear()
+
+    _invalidate_models_cache_cb = _invalidate_models_cache
 
     # Track endpoints that have failed recently so we back off probing dead ones.
     _probe_failures = {}  # ep_id → (last_fail_ts, consecutive_fails)
@@ -362,6 +380,14 @@ def setup_model_routes(model_discovery):
                     def _probe_one(ep):
                         base = _normalize_base(ep.base_url)
                         try:
+                            from services import bundled_llm
+
+                            if (
+                                getattr(ep, "name", "") == bundled_llm.ENDPOINT_NAME
+                                or bundled_llm.is_bundled_endpoint_url(base)
+                            ):
+                                ids = bundled_llm.sync_endpoint_models()
+                                return ep, ids or None, None
                             ids = _probe_endpoint(base, ep.api_key, timeout=2)
                             return ep, ids, None
                         except Exception as e:
@@ -416,9 +442,18 @@ def setup_model_routes(model_discovery):
         for ep in endpoints:
             base = _normalize_base(ep.base_url)
             provider = _detect_provider(base)
-            # Use cached models — background refresh keeps them updated
             model_ids = []
-            if ep.cached_models:
+            try:
+                from services import bundled_llm
+
+                if (
+                    getattr(ep, "name", "") == bundled_llm.ENDPOINT_NAME
+                    or bundled_llm.is_bundled_endpoint_url(base)
+                ):
+                    model_ids = bundled_llm.sync_endpoint_models()
+            except Exception:
+                pass
+            if not model_ids and ep.cached_models:
                 try:
                     model_ids = json.loads(ep.cached_models)
                 except Exception:
@@ -447,9 +482,9 @@ def setup_model_routes(model_discovery):
                     "port": 0,
                     "url": chat_url,
                     "models": curated,
-                    "models_display": [mid.split("/")[-1] for mid in curated],
+                    "models_display": [_model_display_name(mid) for mid in curated],
                     "models_extra": extra,
-                    "models_extra_display": [mid.split("/")[-1] for mid in extra],
+                    "models_extra_display": [_model_display_name(mid) for mid in extra],
                     "endpoint_id": ep.id,
                     "endpoint_name": ep.name,
                     "category": category,

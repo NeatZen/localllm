@@ -15,6 +15,10 @@ class ModelHubAction(BaseModel):
     model_id: str
 
 
+class ModelHubPathAction(BaseModel):
+    path: str
+
+
 def setup_model_hub_routes() -> APIRouter:
     router = APIRouter(tags=["model-hub"])
 
@@ -33,5 +37,9 @@ def setup_model_hub_routes() -> APIRouter:
     @router.post("/api/model-hub/activate")
     async def hub_activate(body: ModelHubAction, _admin: None = Depends(require_admin)):
         return await model_hub.activate_model(body.model_id.strip())
+
+    @router.post("/api/model-hub/activate-by-path")
+    async def hub_activate_by_path(body: ModelHubPathAction, _admin: None = Depends(require_admin)):
+        return await model_hub.activate_model_by_path(body.path.strip())
 
     return router

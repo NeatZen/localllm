@@ -36,6 +36,7 @@ import themeModule from './js/theme.js';
 // _envState objects), which broke server selection. Keep all cookbook imports
 // unversioned so this can't recur.
 import cookbookModule from './js/cookbook.js';
+import modelsPageModule from './js/modelsPage.js';
 import groupModule from './js/group.js';
 import * as researchPanelModule from './js/research/panel.js';
 import ttsModule from './js/tts-ai.js';
@@ -50,6 +51,9 @@ window.sessionModule = sessionModule;
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
+window.modelsPageModule = modelsPageModule;
+window.modelsModule = modelsModule;
+window.refreshModels = () => modelsModule.refreshModels(true);
 
 // Redirect to login on 401 from any fetch
 const _origFetch = window.fetch;
@@ -955,6 +959,7 @@ function initializeEventListeners() {
     },
     '/calendar': () => calendarModule && calendarModule.openCalendar(),
     '/cookbook': () => document.getElementById('tool-cookbook-btn')?.click(),
+    '/models': () => modelsPageModule?.open?.() || document.getElementById('tool-models-page-btn')?.click(),
     '/email':    () => {
       // Collapse the wide sidebar → icon rail (48px) so the user keeps
       // navigation visible alongside the fullscreen email view.
@@ -3877,6 +3882,8 @@ function startOdysseusApp() {
   }
 
   // Non-critical: load in parallel, resolve silently
+  if (modelsPageModule?.init) modelsPageModule.init();
+
   modelsModule.refreshModels(true).then(() => {
     const modelsBox = document.getElementById('models');
     const hasModels = modelsBox && modelsBox.querySelector('.models-row');

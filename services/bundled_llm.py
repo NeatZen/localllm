@@ -47,11 +47,29 @@ def is_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
+def project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def models_dir() -> Path:
     override = os.getenv("BUNDLED_LLM_MODELS_DIR", "").strip()
     if override:
         return Path(override)
-    return Path(__file__).resolve().parent.parent / "data" / "models" / "bundled"
+    return project_root() / "data" / "models" / "bundled"
+
+
+def _model_id_for_path(path: Path, *, separator: str | None = None) -> str:
+    """Relative model id (matches llama_cpp.server on this platform)."""
+    try:
+        rel = path.resolve().relative_to(project_root().resolve())
+        mid = str(rel)
+    except ValueError:
+        mid = str(path.resolve())
+    if separator == "\\":
+        return mid.replace("/", "\\")
+    if separator == "/":
+        return mid.replace("\\", "/")
+    return mid
 
 
 def _active_model_path() -> Path:
@@ -336,6 +354,87 @@ def _kill_orphaned_server_processes() -> None:
         logger.debug("Orphaned server cleanup: %s", e)
 
 
+def _live_model_ids() -> list[str]:
+    try:
+        r = httpx.get(f"{base_url()}/models", timeout=5)
+        if r.status_code == 200:
+            data = r.json().get("data") or []
+            return [str(m["id"]) for m in data if m.get("id")]
+    except Exception:
+        pass
+    return []
+
+
+def is_bundled_endpoint_url(url: str) -> bool:
+    normalized = (url or "").rstrip("/")
+    return normalized == base_url().rstrip("/") or normalized.endswith(
+        f":{BUNDLED_LLM_PORT}/v1"
+    )
+
+
+def sync_endpoint_models() -> list[str]:
+    """Publish all installed bundled GGUF files to the endpoint model picker."""
+    import json
+
+    from core.database import SessionLocal, ModelEndpoint
+
+    live = _live_model_ids()
+    sep = "\\" if live and "\\" in live[0] else "/"
+    model_ids: list[str] = []
+    seen: set[str] = set()
+
+    for mid in live:
+        if mid not in seen:
+            model_ids.append(mid)
+            seen.add(mid)
+
+    for path in sorted(models_dir().glob("*.gguf")):
+        if not is_model_downloaded_at(path):
+            continue
+        mid = _model_id_for_path(path, separator=sep)
+        if mid not in seen:
+            model_ids.append(mid)
+            seen.add(mid)
+
+    if not model_ids:
+        return []
+
+    db = SessionLocal()
+    try:
+        ep = (
+            db.query(ModelEndpoint)
+            .filter(ModelEndpoint.base_url == base_url())
+            .first()
+        )
+        if not ep:
+            ep = (
+                db.query(ModelEndpoint)
+                .filter(ModelEndpoint.name == ENDPOINT_NAME)
+                .first()
+            )
+        if not ep:
+            return []
+        ep.cached_models = json.dumps(model_ids)
+        db.commit()
+        logger.info("Synced %d bundled model(s) to endpoint picker", len(model_ids))
+        return model_ids
+    except Exception as e:
+        logger.warning("Failed to sync bundled endpoint models: %s", e)
+        db.rollback()
+        return []
+    finally:
+        db.close()
+
+
+def _invalidate_models_cache() -> None:
+    try:
+        from routes.model_routes import invalidate_models_cache
+
+        invalidate_models_cache()
+    except Exception:
+        pass
+
+
 def register_endpoint() -> bool:
     """Register the bundled endpoint in the DB if missing."""
     from core.database import SessionLocal, ModelEndpoint
@@ -349,6 +448,8 @@ def register_endpoint() -> bool:
             if not existing.is_enabled:
                 existing.is_enabled = True
                 db.commit()
+            sync_endpoint_models()
+            _invalidate_models_cache()
             _migrate_stale_chat_targets(existing.id)
             return True
         ep = ModelEndpoint(
@@ -360,6 +461,8 @@ def register_endpoint() -> bool:
         db.add(ep)
         db.commit()
         logger.info("Auto-registered bundled LLM endpoint at %s", url)
+        sync_endpoint_models()
+        _invalidate_models_cache()
         _migrate_stale_chat_targets(ep.id)
         return True
     except Exception as e:

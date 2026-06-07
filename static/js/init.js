@@ -405,7 +405,7 @@ window.addEventListener('pageshow', clearFreshComposerRestore);
           });
         }
         stopped = true;
-        if (typeof window.refreshModels === 'function') window.refreshModels();
+        if (window.modelsModule?.refreshModels) window.modelsModule.refreshModels(true);
         return;
       } else if (s.state === 'missing_model') {
         tip.textContent = 'Run install-turnkey.ps1 once to download the built-in AI.';
