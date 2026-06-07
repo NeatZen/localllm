@@ -326,7 +326,7 @@ export function _addTask(sessionId, name, type, payload) {
   let tasks = _loadTasks();
   const remoteHost = (payload && payload.remote_host) || _envState.remoteHost || '';
   const sshPort = (payload && payload.ssh_port) || _getPort(remoteHost) || '';
-  const platform = (payload && payload.platform) || _getPlatform(remoteHost) || '';
+  const platform = (payload && payload.platform) || _getPlatform(remoteHost) || (_isWindows() ? 'windows' : '');
   // Serving a model supersedes its finished download — clear the matching
   // finished download card (covers serving directly from the Serve tab, not just
   // via the download card's "Serve →" button).
@@ -404,11 +404,41 @@ export function _tmuxCmd(task, tmuxArgs) {
   return `tmux ${tmuxArgs} 2>/dev/null`;
 }
 
+function _winLocalPs(cmd) {
+  return `powershell -NoProfile -Command "${cmd.replace(/"/g, '\\"')}"`;
+}
+
 function _winSessionCmd(task, tmuxArgs) {
   const sd = '$env:TEMP\\odysseus-sessions';
   const sid = task.sessionId;
   const pf = _sshPrefix(_getPort(task));
   const host = task.remoteHost;
+  if (!host) {
+    if (tmuxArgs.includes('capture-pane')) {
+      const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
+      return _winLocalPs(`Get-Content '${sd}\\${sid}.log' -Tail ${lines} -ErrorAction SilentlyContinue`);
+    }
+    if (tmuxArgs.includes('has-session')) {
+      return _winLocalPs(
+        `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; `
+        + 'if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }'
+      );
+    }
+    if (tmuxArgs.includes('kill-session')) {
+      return _winLocalPs(
+        `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; `
+        + `if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; `
+        + `Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`
+      );
+    }
+    if (tmuxArgs.includes('send-keys') && tmuxArgs.includes('C-c')) {
+      return _winLocalPs(
+        `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; `
+        + 'if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }'
+      );
+    }
+    return _winLocalPs('exit 1');
+  }
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
     const ps = `Get-Content '${sd}\\${sid}.log' -Tail ${lines} -ErrorAction SilentlyContinue`;
@@ -435,6 +465,9 @@ function _tmuxGracefulKill(task) {
     const sid = task.sessionId;
     const pf = _sshPrefix(_getPort(task));
     const ps = `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`;
+    if (!task.remoteHost) {
+      return _winLocalPs(ps);
+    }
     return `ssh ${pf}${task.remoteHost} "powershell -Command \\"${ps}\\""`;
   }
   if (task.remoteHost) {
@@ -701,13 +734,17 @@ async function _retryTask(el, task) {
       body: JSON.stringify({ command: _tmuxGracefulKill(task) }),
     });
   } catch {}
-  _removeTask(task.sessionId);
   if (task.payload) {
     if (task.type === 'serve' && task.payload._cmd) {
+      _removeTask(task.sessionId);
       _launchServeTask(task.name, task.payload.repo_id, task.payload._cmd, task.payload._fields, task.remoteHost || '');
     } else {
-      _retryDownload(task.name, task.payload);
+      const ok = await _retryDownload(task.name, task.payload);
+      if (ok) _removeTask(task.sessionId);
+      else _renderRunningTab();
     }
+  } else {
+    _removeTask(task.sessionId);
   }
 }
 
@@ -724,17 +761,19 @@ async function _retryDownload(name, payload) {
     });
     if (!res.ok) {
       uiModule.showToast('Download failed: HTTP ' + res.status);
-      return;
+      return false;
     }
     const data = await res.json();
     if (!data.ok) {
       uiModule.showToast('Download failed: ' + (data.error || ''));
-      return;
+      return false;
     }
-    _addTask(data.session_id, name, 'download', payload);
+    _addTask(data.session_id, name, 'download', _payload);
     uiModule.showToast(`Downloading ${name}...`);
+    return true;
   } catch (e) {
     uiModule.showToast('Download failed: ' + e.message);
+    return false;
   }
 }
 
@@ -1641,7 +1680,9 @@ export function _renderRunningTab() {
         }
         if (_isWindows(task)) {
           const sd = '$env:TEMP\\odysseus-sessions';
-          const logCmd = `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`;
+          const logCmd = task.remoteHost
+            ? `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`
+            : `powershell -NoProfile -Command "Get-Content '${sd}\\${task.sessionId}.log' -Wait"`;
           items.push({ label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
             _copyText(logCmd);
           }});
@@ -1919,7 +1960,7 @@ async function _reconnectTask(el, task) {
             el.appendChild(diagEl);
           }
           _showDiagnosis(el, diag, lastOutput);
-          _updateTask(task.sessionId, { status: 'error' });
+          _updateTask(task.sessionId, { status: 'error', output: lastOutput.slice(-5000) });
           el.dataset.status = 'error';
           const badge = el.querySelector('.cookbook-task-status');
           if (badge) { badge.textContent = _statusLabel('error', task.type); badge.className = 'cookbook-task-status cookbook-task-error'; }
@@ -1927,7 +1968,7 @@ async function _reconnectTask(el, task) {
         } else {
           const looksSuccessful = !lastOutput.includes('DOWNLOAD_FAILED') && (lastOutput.includes('DONE') || lastOutput.includes('100%') || lastOutput.includes('Application startup complete') || lastOutput.includes('/snapshots/') || lastOutput.includes('Download complete') || lastOutput.includes('DOWNLOAD_OK'));
           if (!lastOutput.trim() || (task.type === 'download' && !looksSuccessful)) {
-            _updateTask(task.sessionId, { status: 'crashed' });
+            _updateTask(task.sessionId, { status: 'crashed', output: lastOutput.slice(-5000) });
             el.dataset.status = 'crashed';
             const badge = el.querySelector('.cookbook-task-status');
             if (badge) { badge.textContent = _statusLabel('crashed', task.type); badge.className = 'cookbook-task-status cookbook-task-crashed'; }

@@ -436,14 +436,15 @@ export async function _runModelDownload(panel, model, backend, hostOverride) {
   const srv = _envState.servers.find(s => s.host === host) || {};
   const env = host ? (srv.env || 'none') : (_envState.env || 'none');
   const envPath = host ? (srv.envPath || '') : (_envState.envPath || '');
-  const platform = host ? (srv.platform || '') : (_envState.platform || '');
-  const isWin = host ? (platform === 'windows') : _isWindows();
+  const platform = host ? (srv.platform || '') : (_envState.platform || (_isWindows() ? 'windows' : ''));
+  const isWin = _isWindows(host ? { remoteHost: host, platform } : { remoteHost: '' });
 
   const payload = { repo_id: repo };
   if (include) payload.include = include;
   if (_envState.hfToken) payload.hf_token = _envState.hfToken;
   if (host) { payload.remote_host = host; const _sp = _getPort(host); if (_sp) payload.ssh_port = _sp; }
-  if (platform) payload.platform = platform;
+  if (isWin) payload.platform = 'windows';
+  else if (platform) payload.platform = platform;
   // If this server has a directory flagged as the download target, send it so
   // the backend downloads into <dir>/<model> instead of the default HF cache.
   if (srv.downloadDir) payload.local_dir = srv.downloadDir;

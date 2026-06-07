@@ -1,6 +1,7 @@
 import os
 import platform
 import subprocess
+import sys
 import time
 
 CACHE_TTL = 1800  # 30 min — hardware rarely changes; use the Rescan button to force a re-probe
@@ -283,10 +284,7 @@ def _get_cpu_count():
     return os.cpu_count() or 1
 
 
-def _detect_windows():
-    """Detect Windows hardware in a single SSH call using PowerShell."""
-    # Single PowerShell command that gathers all hardware info at once
-    ps_cmd = (
+_WINDOWS_HW_PS = (
         "$r = @{}; "
         "$os = Get-CimInstance Win32_OperatingSystem; "
         "$r.ram_gb = [math]::Round($os.TotalVisibleMemorySize / 1048576, 1); "
@@ -320,8 +318,10 @@ def _detect_windows():
         "  } "
         "}; "
         "$r | ConvertTo-Json -Compress"
-    )
-    out = _run(f'powershell -Command "{ps_cmd}"')
+)
+
+
+def _parse_windows_hw_json(out: str):
     if not out:
         return None
     import json as _json
@@ -360,6 +360,28 @@ def _detect_windows():
         return None
 
 
+def _detect_windows_local():
+    """Detect Windows hardware when Odysseus itself is running on Windows."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", _WINDOWS_HW_PS],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if r.returncode != 0:
+            return None
+        return _parse_windows_hw_json((r.stdout or "").strip())
+    except Exception:
+        return None
+
+
+def _detect_windows():
+    """Detect Windows hardware in a single SSH call using PowerShell."""
+    out = _run(f'powershell -Command "{_WINDOWS_HW_PS}"')
+    return _parse_windows_hw_json(out)
+
+
 _cache_by_host = {}  # host -> (timestamp, result)
 
 
@@ -382,6 +404,13 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     _remote_host = host or None
     _remote_port = ssh_port or None
     _remote_platform = platform or None
+
+    # Local Windows: RAM/CPU via PowerShell (Linux /proc paths return 0 on Win32).
+    if not host and (platform == "windows" or (not platform and sys.platform == "win32")):
+        result = _detect_windows_local()
+        if result:
+            _cache_by_host[cache_key] = (now, result)
+            return result
 
     # Windows: single PowerShell command for all hardware info
     if _remote_platform == "windows" and _remote_host:

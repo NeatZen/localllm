@@ -166,9 +166,27 @@ export function _getPlatform(hostOrTask) {
   return srv?.platform || '';
 }
 
+/** True when this browser is running on Windows (local machine UI). */
+export function _clientIsWindows() {
+  try {
+    if (navigator.userAgentData?.platform === 'Windows') return true;
+    return /Windows/i.test(navigator.userAgent || '');
+  } catch {
+    return false;
+  }
+}
+
 /** Check if the current active server is Windows */
 export function _isWindows(hostOrTask) {
-  return _getPlatform(hostOrTask) === 'windows';
+  if (_getPlatform(hostOrTask) === 'windows') return true;
+  // Local Cookbook downloads on a Windows host were missing platform=windows
+  // because the Local dropdown clears _envState.platform — treat client OS as
+  // the local server OS when no remote host is in play.
+  if (!hostOrTask || (typeof hostOrTask === 'object' && !hostOrTask.remoteHost)) {
+    if (!hostOrTask && !_envState.remoteHost && _clientIsWindows()) return true;
+    if (typeof hostOrTask === 'object' && !hostOrTask.remoteHost && _clientIsWindows()) return true;
+  }
+  return false;
 }
 
 /** Detect model-specific vLLM optimizations */

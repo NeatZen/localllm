@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
@@ -361,8 +362,14 @@ def setup_cookbook_routes() -> APIRouter:
             lines.append("export HF_HUB_DOWNLOAD_MAX_WORKERS=8")
 
         remote = req.remote_host  # None for local
-        is_windows = req.platform == "windows"
+        is_windows = req.platform == "windows" or (not remote and sys.platform == "win32")
         logger.info(f"Download request: repo={req.repo_id}, remote={remote}, ssh_port={req.ssh_port}, platform={req.platform}")
+
+        hf_cmd_ps = f"hf download {req.repo_id}"
+        if req.include:
+            hf_cmd_ps += f" --include '{req.include}'"
+        if _dl_base:
+            hf_cmd_ps += f" --local-dir '{Path(_dl_base).expanduser()}'"
 
         if not is_windows and not await _binary_available("tmux", remote, req.ssh_port):
             return {
@@ -382,22 +389,32 @@ def setup_cookbook_routes() -> APIRouter:
             if req.env_prefix:
                 ps_lines.append(_safe_env_prefix(req.env_prefix))
             # Try hf CLI, fall back to Python huggingface_hub, then auto-install
+            if req.disable_hf_transfer:
+                ps_lines.append('$env:HF_HUB_ENABLE_HF_TRANSFER = "0"')
+                ps_lines.append('$env:HF_HUB_DOWNLOAD_MAX_WORKERS = "4"')
+            else:
+                ps_lines.append('python -m pip install -q hf_transfer 2>$null')
+                ps_lines.append('$env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
+                ps_lines.append('$env:HF_HUB_DOWNLOAD_MAX_WORKERS = "8"')
             ps_lines.append('try {{')
             ps_lines.append('  $hfPath = Get-Command hf -ErrorAction SilentlyContinue')
             ps_lines.append('  if ($hfPath) {{')
             # Pipe $null to stdin to suppress interactive "update available? [Y/n]" prompt
-            ps_lines.append(f'    $null | {hf_cmd}')
+            ps_lines.append(f'    $null | {hf_cmd_ps}')
             ps_lines.append('  }} else {{')
             ps_lines.append('    python -c "import huggingface_hub" 2>$null')
             ps_lines.append('    if ($LASTEXITCODE -eq 0) {{')
             ps_lines.append('      Write-Host "hf CLI not found, using Python huggingface_hub..."')
-            ps_lines.append('      python -m pip install -q hf_transfer 2>$null')
-            ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
+            if not req.disable_hf_transfer:
+                ps_lines.append('      python -m pip install -q hf_transfer 2>$null')
+                ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
             ps_lines.append(f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\"")
             ps_lines.append('    }} else {{')
             ps_lines.append('      Write-Host "Installing huggingface-hub..."')
-            ps_lines.append('      python -m pip install -q huggingface-hub hf_transfer')
-            ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
+            ps_lines.append('      python -m pip install -q huggingface-hub')
+            if not req.disable_hf_transfer:
+                ps_lines.append('      python -m pip install -q hf_transfer')
+                ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
             ps_lines.append(f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\"")
             ps_lines.append('    }}')
             ps_lines.append('  }}')
@@ -425,6 +442,61 @@ def setup_cookbook_routes() -> APIRouter:
             setup_cmd = (
                 f"scp -O {_Pf}-q '{runner_path}' {remote}:{remote_runner} && "
                 f'ssh {_pf}{remote} "powershell -Command \\"{launch_ps}\\""'
+            )
+
+        elif is_windows and not remote:
+            # ── Local Windows: PowerShell background download (no tmux/bash) ──
+            ps_lines = []
+            ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
+            ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
+            if req.hf_token:
+                ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
+            if req.env_prefix:
+                ps_lines.append(_safe_env_prefix(req.env_prefix))
+            if req.disable_hf_transfer:
+                ps_lines.append('$env:HF_HUB_ENABLE_HF_TRANSFER = "0"')
+                ps_lines.append('$env:HF_HUB_DOWNLOAD_MAX_WORKERS = "4"')
+            else:
+                ps_lines.append('python -m pip install -q hf_transfer 2>$null')
+                ps_lines.append('$env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
+                ps_lines.append('$env:HF_HUB_DOWNLOAD_MAX_WORKERS = "8"')
+            ps_lines.append('try {{')
+            ps_lines.append('  $hfPath = Get-Command hf -ErrorAction SilentlyContinue')
+            ps_lines.append('  if ($hfPath) {{')
+            ps_lines.append(f'    $null | {hf_cmd_ps}')
+            ps_lines.append('  }} else {{')
+            ps_lines.append('    python -c "import huggingface_hub" 2>$null')
+            ps_lines.append('    if ($LASTEXITCODE -eq 0) {{')
+            ps_lines.append('      Write-Host "hf CLI not found, using Python huggingface_hub..."')
+            if not req.disable_hf_transfer:
+                ps_lines.append('      python -m pip install -q hf_transfer 2>$null')
+                ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
+            ps_lines.append(f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\"")
+            ps_lines.append('    }} else {{')
+            ps_lines.append('      Write-Host "Installing huggingface-hub..."')
+            ps_lines.append('      python -m pip install -q huggingface-hub')
+            if not req.disable_hf_transfer:
+                ps_lines.append('      python -m pip install -q hf_transfer')
+                ps_lines.append('      $env:HF_HUB_ENABLE_HF_TRANSFER = "1"')
+            ps_lines.append(f"      python -c \"import os; from huggingface_hub import snapshot_download; snapshot_download('{req.repo_id}'{_dl_pyarg}, max_workers=8)\"")
+            ps_lines.append('    }}')
+            ps_lines.append('  }}')
+            ps_lines.append('  if ($LASTEXITCODE -eq 0) {{ Write-Host ""; Write-Host "DOWNLOAD_OK" }}')
+            ps_lines.append('  else {{ Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)" }}')
+            ps_lines.append('}} catch {{')
+            ps_lines.append('  Write-Host ""; Write-Host "DOWNLOAD_FAILED ($_)"')
+            ps_lines.append('}}')
+            runner_path = TMUX_LOG_DIR / f"{session_id}_run.ps1"
+            runner_path.write_text("\r\n".join(ps_lines) + "\r\n")
+            _rp = str(runner_path).replace("'", "''")
+            setup_cmd = (
+                'powershell -NoProfile -Command "'
+                '$sd = \\"$env:TEMP\\odysseus-sessions\\"; '
+                'New-Item -ItemType Directory -Force -Path $sd | Out-Null; '
+                f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','{_rp}' "
+                f'-RedirectStandardOutput \\"$sd\\{session_id}.log\\" '
+                f'-RedirectStandardError \\"$sd\\{session_id}.err.log\\" '
+                f'-NoNewWindow -PassThru | ForEach-Object {{ $_.Id | Out-File \\"$sd\\{session_id}.pid\\" }}"'
             )
 
         elif remote:
@@ -1617,8 +1689,11 @@ def setup_cookbook_routes() -> APIRouter:
             if _tport and not _SSH_PORT_RE.match(str(_tport)):
                 logger.warning(f"Skipping task with unsafe sshPort: {_tport!r}")
                 continue
-            if task_platform == "windows" and remote:
-                # Windows: check PID file + Get-Process, read log tail
+            _task_is_windows = task_platform == "windows" or (
+                not remote and sys.platform == "win32"
+            )
+            if _task_is_windows and remote:
+                # Windows remote: check PID file + Get-Process, read log tail
                 sd = "$env:TEMP\\odysseus-sessions"
                 ssh_base = ["ssh"]
                 if _tport and _tport != "22":
@@ -1634,7 +1709,22 @@ def setup_cookbook_routes() -> APIRouter:
                     remote,
                     "powershell",
                     "-Command",
-                    f"Get-Content \"{sd}\\{session_id}.log\" -Tail 10 -ErrorAction SilentlyContinue",
+                    f"Get-Content \"{sd}\\{session_id}.log\" -Tail 50 -ErrorAction SilentlyContinue",
+                ]
+            elif _task_is_windows and not remote:
+                sd = r"$env:TEMP\odysseus-sessions"
+                check_cmd = [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"$pid = Get-Content '{sd}\\{session_id}.pid' -ErrorAction SilentlyContinue; "
+                    "if ($pid) { Get-Process -Id $pid -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } else { exit 1 } } else { exit 1 }",
+                ]
+                capture_cmd = [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"Get-Content '{sd}\\{session_id}.log' -Tail 50 -ErrorAction SilentlyContinue",
                 ]
             elif remote:
                 ssh_base = ["ssh"]
