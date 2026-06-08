@@ -291,6 +291,25 @@
 
 <script nonce="{{CSP_NONCE}}">
 (async () => {
+  const _SESSION_TOKEN_KEY = 'neatai-session-token';
+  const _SESSION_HEADER = 'X-NeatAi-Session';
+  const _origFetch = window.fetch;
+  function _storeSessionToken(data) {
+    if (data && data.session_token) {
+      sessionStorage.setItem(_SESSION_TOKEN_KEY, data.session_token);
+    }
+  }
+  window.fetch = function(input, init) {
+    const tok = sessionStorage.getItem(_SESSION_TOKEN_KEY);
+    if (tok) {
+      init = init ? { ...init } : {};
+      const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+      if (!headers.has(_SESSION_HEADER)) headers.set(_SESSION_HEADER, tok);
+      init.headers = headers;
+    }
+    return _origFetch.call(this, input, init);
+  };
+
   // Load version
   try {
     const vr = await fetch('/api/version');
@@ -367,6 +386,7 @@
       } catch (_) {}
       try {
         await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+        sessionStorage.removeItem(_SESSION_TOKEN_KEY);
       } catch (_) {}
       setMode('login');
       return;
@@ -410,6 +430,7 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Invalid code');
         if (!data.ok) throw new Error('Login failed');
+        _storeSessionToken(data);
         form._totpMode = false;
         finishLogin();
       } catch (err) {
@@ -491,6 +512,7 @@
     }
     try {
       let data = await doLogin();
+      if (data.ok && data.session_token) _storeSessionToken(data);
       // 2FA required — show TOTP input
       if (data.requires_totp) {
         submitBtn.disabled = false;
@@ -507,6 +529,7 @@
         submitBtn.textContent = 'Verify';
         return;
       }
+      _storeSessionToken(data);
       finishLogin();
     } catch (err) {
       errEl.textContent = err.message;

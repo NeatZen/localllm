@@ -67,8 +67,20 @@ window.refreshModels = () => modelsModule.refreshModels(true);
 
 // Redirect to login on 401 from any fetch (once per page — avoid / ↔ /login loops)
 const _origFetch = window.fetch;
+const _SESSION_TOKEN_KEY = 'neatai-session-token';
+const _SESSION_HEADER = 'X-NeatAi-Session';
 let _authRedirectPending = false;
 window.fetch = async function(...args) {
+  const tok = sessionStorage.getItem(_SESSION_TOKEN_KEY);
+  if (tok) {
+    let [input, init] = args;
+    init = init ? { ...init } : {};
+    const baseHeaders = init.headers || (input instanceof Request ? input.headers : undefined);
+    const headers = new Headers(baseHeaders);
+    if (!headers.has(_SESSION_HEADER)) headers.set(_SESSION_HEADER, tok);
+    init.headers = headers;
+    args = [input, init];
+  }
   const res = await _origFetch.apply(this, args);
   const url = String(args[0] || '');
   if (res.status === 401 && !url.includes('/api/auth/')) {

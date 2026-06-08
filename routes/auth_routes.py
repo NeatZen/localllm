@@ -7,6 +7,7 @@ import logging
 import os
 
 from core.auth import AuthManager
+from src.auth_helpers import get_session_token_from_request
 from src.rate_limiter import RateLimiter
 from src.settings import (
     load_settings as _load_settings,
@@ -72,7 +73,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
     _setup_limiter = RateLimiter(max_requests=3, window_seconds=300)
 
     def _get_current_user(request: Request) -> Optional[str]:
-        token = request.cookies.get(SESSION_COOKIE)
+        token = get_session_token_from_request(request)
         return auth_manager.get_username_for_token(token)
 
     @router.post("/setup")
@@ -137,7 +138,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         if body.remember:
             cookie_kwargs["max_age"] = 60 * 60 * 24 * 7  # 7 days
         response.set_cookie(**cookie_kwargs)
-        return {"ok": True, "username": username}
+        # Header fallback for phone/LAN browsers that drop HttpOnly cookies on HTTP.
+        return {"ok": True, "username": username, "session_token": token}
 
     @router.post("/logout")
     async def logout(request: Request, response: Response):
@@ -149,7 +151,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
     @router.get("/status")
     async def auth_status(request: Request):
-        token = request.cookies.get(SESSION_COOKIE)
+        token = get_session_token_from_request(request)
         result = auth_manager.status(token)
         result["signup_enabled"] = auth_manager.signup_enabled
         # Include the caller's effective privileges so the frontend can
