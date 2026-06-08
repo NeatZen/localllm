@@ -35,9 +35,14 @@ function _renderHardware(hw) {
 }
 
 function _rowActionsBundled(model) {
-  if (model.active) return '<span class="models-page-muted">In use</span>';
+  const delBtn = model.installed
+    ? `<button type="button" class="admin-btn-sm models-page-delete" data-model-id="${esc(model.id)}">Delete</button>`
+    : '';
+  if (model.active) {
+    return `<span class="models-page-muted">In use</span>${delBtn ? `<span class="models-page-action-group">${delBtn}</span>` : ''}`;
+  }
   if (model.installed) {
-    return `<button type="button" class="admin-btn-sm models-page-use" data-model-id="${esc(model.id)}">Use</button>`;
+    return `<span class="models-page-action-group"><button type="button" class="admin-btn-sm models-page-use" data-model-id="${esc(model.id)}">Use</button>${delBtn}</span>`;
   }
   const dl = model.download || {};
   if (dl.state === 'downloading') {
@@ -158,7 +163,7 @@ function _renderPage(data) {
     )}
     ${_section(
       'Best for your hardware',
-      'GGUF models ranked for your GPU and RAM from the Odysseus catalog.',
+      'GGUF models ranked for your GPU and RAM from the NeatAi catalog.',
       _hwfitRows(data.best_for_hardware || []),
     )}
     ${_section(
@@ -219,6 +224,37 @@ function _renderPage(data) {
         if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
       } catch (e) {
         uiModule.showError(e.message || 'Switch failed');
+        btn.disabled = false;
+      }
+    });
+  });
+
+  root.querySelectorAll('.models-page-delete').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.modelId;
+      if (!id) return;
+      const name = _data?.bundled?.find(m => m.id === id)?.name || id;
+      const active = _data?.bundled?.find(m => m.id === id)?.active;
+      const msg = active
+        ? `Delete "${name}"? Built-in AI will stop and switch to another model if one is installed.`
+        : `Delete "${name}" from disk? This frees disk space and cannot be undone.`;
+      if (!(await uiModule.styledConfirm(msg, { confirmText: 'Delete', danger: true }))) return;
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/model-hub/delete', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model_id: id }),
+        });
+        const out = await res.json();
+        if (!res.ok || !out.ok) throw new Error(out.error || 'Delete failed');
+        uiModule.showToast(`Deleted ${name}`);
+        await refresh(true);
+        if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+        if (window.modelHubModule?.refresh) await window.modelHubModule.refresh();
+      } catch (e) {
+        uiModule.showError(e.message || 'Delete failed');
         btn.disabled = false;
       }
     });

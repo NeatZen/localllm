@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from core.middleware import require_admin
+from src.auth_helpers import require_user
 from services import model_hub
 
 logger = logging.getLogger(__name__)
@@ -41,5 +42,9 @@ def setup_model_hub_routes() -> APIRouter:
     @router.post("/api/model-hub/activate-by-path")
     async def hub_activate_by_path(body: ModelHubPathAction, _admin: None = Depends(require_admin)):
         return await model_hub.activate_model_by_path(body.path.strip())
+
+    @router.post("/api/model-hub/delete")
+    async def hub_delete(body: ModelHubAction, _user: str = Depends(require_user)):
+        return await model_hub.delete_model(body.model_id.strip())
 
     return router

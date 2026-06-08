@@ -37,12 +37,15 @@ function renderModelCard(model) {
   }
 
   let actions = '';
+  const deleteBtn = model.installed
+    ? `<button type="button" class="admin-btn-sm model-hub-delete" data-model-id="${esc(model.id)}">Delete</button>`
+    : '';
   if (model.active) {
-    actions = '<span class="model-hub-active-label">In use</span>';
+    actions = `<span class="model-hub-active-label">In use</span>${deleteBtn}`;
   } else if (isDownloading) {
     actions = '<button class="admin-btn-sm" disabled>Downloading...</button>';
   } else if (model.installed) {
-    actions = `<button class="admin-btn-sm model-hub-use" data-model-id="${esc(model.id)}">Use Model</button>`;
+    actions = `<button class="admin-btn-sm model-hub-use" data-model-id="${esc(model.id)}">Use Model</button>${deleteBtn}`;
   } else {
     actions = `<button class="admin-btn-sm model-hub-download" data-model-id="${esc(model.id)}">Download</button>`;
   }
@@ -128,30 +131,45 @@ function bindActions() {
   list.addEventListener('click', async (e) => {
     const dlBtn = e.target.closest('.model-hub-download');
     const useBtn = e.target.closest('.model-hub-use');
-    const btn = dlBtn || useBtn;
+    const delBtn = e.target.closest('.model-hub-delete');
+    const btn = dlBtn || useBtn || delBtn;
     if (!btn || btn.disabled) return;
 
     const modelId = btn.dataset.modelId;
     if (!modelId) return;
 
+    if (delBtn) {
+      const card = btn.closest('.model-hub-row');
+      const name = card?.querySelector('.model-hub-name')?.textContent?.trim() || modelId;
+      const isActive = card?.classList.contains('is-active');
+      const msg = isActive
+        ? `Delete "${name}"? Built-in AI will stop and switch to another model if one is installed.`
+        : `Delete "${name}" from disk? This frees disk space and cannot be undone.`;
+      if (!(await uiModule.styledConfirm(msg, { confirmText: 'Delete', danger: true }))) return;
+    }
+
     btn.disabled = true;
     const prev = btn.textContent;
-    btn.textContent = dlBtn ? 'Starting...' : 'Switching...';
+    btn.textContent = delBtn ? 'Deleting...' : (dlBtn ? 'Starting...' : 'Switching...');
 
     try {
       if (dlBtn) {
         await postAction('/api/model-hub/download', modelId);
-      } else {
+      } else if (useBtn) {
         await postAction('/api/model-hub/activate', modelId);
         if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
         if (window.sessionModule?.updateModelPicker) window.sessionModule.updateModelPicker();
+      } else {
+        await postAction('/api/model-hub/delete', modelId);
+        if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+        if (window.modelsPageModule?.refresh) await window.modelsPageModule.refresh(true);
       }
       await refresh();
     } catch (err) {
       console.error('Model hub action failed:', err);
       btn.disabled = false;
       btn.textContent = prev;
-      alert(err.message || 'Action failed');
+      uiModule.showError(err.message || 'Action failed');
     }
   });
 }

@@ -1,19 +1,21 @@
-# Odysseus
+# NeatAi
 ───────────────────────────────────────────────
- ⊹ ࣪ ˖ ૮( ˶ᵔ ᵕ ᵔ˶ )っ  Odysseus vers. 1.0
+ ⊹ ࣪ ˖ ૮( ˶ᵔ ᵕ ᵔ˶ )っ  NeatAi vers. 1.0
 ───────────────────────────────────────────────
 
-![Odysseus](docs/odysseus.jpg)
+![NeatAi](docs/neatai.jpg)
 
 A self-hosted AI workspace -- meant to be the self-hosted version of the UI experience you get from ChatGPT and Claude. But with more jank and fun. Running on your own hardware, with your own data -- local-first, privacy-first, and no trojan.
 
-> Fun fact: a chunk of Odysseus was built **from a phone** -- mobile shells (Termux), the PWA install, and on-device agents. So "works on mobile" isn't an afterthought, it's where a lot of it actually happened.
+> **Note:** NeatAi is the successor to **Odysseus**. Same project, new name and branding. CLI entry points live under `scripts/neatai*` (formerly `scripts/odysseus*`).
+
+> Fun fact: a chunk of NeatAi was built **from a phone** -- mobile shells (Termux), the PWA install, and on-device agents. So "works on mobile" isn't an afterthought, it's where a lot of it actually happened.
 
 ## Features
   - **Chat** -- chat with any local model or API; adding them is super simple.<br>　<sub>vLLM · llama.cpp · Ollama · OpenRouter · OpenAI</sub>
   - **Agent** -- hand it tools and let it run the whole task itself.<br>　<sub>built on [opencode](https://github.com/anomalyco/opencode) · MCP · web · files · shell · skills · memory</sub>
-  - **Cookbook** -- Scans your hardware, recommends models, click to download and serve.. easy!<br>　<sub>built on [llmfit](https://github.com/AlexsJones/llmfit) · VRAM-aware · GGUF / FP8 / AWQ · fit scoring · vLLM / llama.cpp serving · Ollama library search + one-click pull · hardware-fit ranking</sub>
-  - **Agent Workspace** -- Give the agent a sandboxed project folder: propose file edits and commands, approve or reject changes, bind sessions to projects.<br>　<sub>project tree · pending approvals · build/test shortcuts · localhost browser testing</sub>
+  - **Cookbook** -- Scans your hardware, recommends models, click to download and serve.. easy!<br>　<sub>built on [llmfit](https://github.com/AlexsJones/llmfit) · VRAM-aware · GGUF / FP8 / AWQ · fit scoring · vLLM / llama.cpp serving · Ollama library search + one-click pull · delete cached/Ollama models · chat picker stays in sync</sub>
+  - **Agent Workspace** -- A sandboxed project folder for building apps: edit files in the panel, use chat for help and snippets, bind sessions to projects.<br>　<sub>file tree · markdown chat · multi-project · localhost testing</sub>
   - **Deep Research** -- multi-step runs that gather, read, and synthesize sources into a nice visual report.<br>　<sub>adapted from [Tongyi DeepResearch](https://github.com/Alibaba-NLP/DeepResearch)</sub>
   - **Compare** -- a fun tool to compare models side by side. Test completely blind, no bias!<br>　<sub>multi-model · blind test · synthesis</sub>
   - **Documents** -- YOU write the text, AI is there to assist, not the opposite.<br>　<sub>multi-tab editor · markdown · HTML · CSV · syntax highlighting · AI edits · suggestions</sub>
@@ -41,23 +43,23 @@ A full, hover-to-play tour lives on the landing page (`docs/index.html`). A few 
 ## Quick Start
 
 Defaults work out of the box — clone, run, configure inside the app.
-Open the **Settings** panel after first login to point Odysseus at your LLM
+Open the **Settings** panel after first login to point NeatAi at your LLM
 server, search provider, email account, etc. Only touch `.env` if you need
 to override deployment-level things like `AUTH_ENABLED`, `DATABASE_URL`,
-or pre-seed `ODYSSEUS_ADMIN_PASSWORD` (otherwise an initial password is
+or pre-seed `NEATAIEUS_ADMIN_PASSWORD` (otherwise an initial password is
 generated and printed on first boot).
 
 ### Option 1: Docker (recommended)
 ```bash
-git clone <your-odysseus-repo-url>
-cd odysseus
+git clone https://github.com/NeatZen/localllm.git
+cd localllm
 cp .env.example .env       # optional, but recommended for explicit defaults
 docker compose up -d --build
 ```
-Compose starts Odysseus, ChromaDB, SearXNG, and ntfy. First run does a full
+Compose starts NeatAi, ChromaDB, SearXNG, and ntfy. First run does a full
 image build. Open `http://localhost:7000` after the containers are healthy.
 
-Cookbook remote servers use an Odysseus-owned SSH key from `./data/ssh`
+Cookbook remote servers use a NeatAi-owned SSH key from `./data/ssh`
 inside Docker. In **Cookbook -> Settings -> Servers**, generate/copy the
 public key and add it to the remote server's `~/.ssh/authorized_keys`.
 After generating the key, you can also install it from the host with:
@@ -65,14 +67,14 @@ After generating the key, you can also install it from the host with:
 ssh-copy-id -i data/ssh/id_ed25519.pub user@server
 ```
 Cookbook local downloads are stored in `./data/huggingface`, mounted as
-`~/.cache/huggingface` inside the Odysseus container.
+`~/.cache/huggingface` inside the NeatAi container.
 
 Useful checks:
 ```bash
 docker compose ps
-docker compose logs --tail=120 odysseus
-docker compose logs odysseus | grep -E 'ChromaDB|MemoryVectorStore|DEGRADED'
-docker compose exec odysseus python -c "from services.hwfit.models import get_models; print(len(get_models()))"
+docker compose logs --tail=120 neatai
+docker compose logs neatai | grep -E 'ChromaDB|MemoryVectorStore|DEGRADED'
+docker compose exec neatai python -c "from services.hwfit.models import get_models; print(len(get_models()))"
 ```
 
 Expected vector-memory startup lines in Docker:
@@ -82,7 +84,7 @@ MemoryVectorStore initialized
 ```
 
 The Cookbook model catalog check should print a non-zero count. If it prints
-`0`, rebuild the Odysseus image with `docker compose build --no-cache odysseus`.
+`0`, rebuild the NeatAi image with `docker compose build --no-cache neatai`.
 
 ### Option 2: Manual install — Linux / macOS
 **Requirements:** Python 3.11+. On Linux/Termux, Cookbook also requires `tmux`
@@ -100,10 +102,10 @@ sudo pacman -S tmux
 sudo dnf install tmux
 ```
 
-Then install Odysseus:
+Then install NeatAi:
 ```bash
-git clone <your-odysseus-repo-url>
-cd odysseus
+git clone https://github.com/NeatZen/localllm.git
+cd localllm
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -115,12 +117,12 @@ uvicorn app:app --host 0.0.0.0 --port 7000
 **Turnkey (recommended on Windows):** bundled local AI (Qwen2.5 3B via llama.cpp), GPU-aware install, and a double-click launcher.
 
 ```powershell
-git clone <your-odysseus-repo-url>
-cd odysseus
+git clone https://github.com/NeatZen/localllm.git
+cd localllm
 .\install-turnkey.ps1          # one-time: venv, deps, ~2 GB model download
 ```
 
-After setup, double-click **`Start Odysseus.bat`** or run:
+After setup, double-click **`Start NeatAi.bat`** or run:
 
 ```powershell
 .\run-phone.ps1               # binds 0.0.0.0, prints a LAN URL for phones on the same Wi-Fi
@@ -130,8 +132,8 @@ After setup, double-click **`Start Odysseus.bat`** or run:
 **Manual install** (same as Linux, without the bundled model):
 
 ```powershell
-git clone <your-odysseus-repo-url>
-cd odysseus
+git clone https://github.com/NeatZen/localllm.git
+cd localllm
 python -m venv venv
 venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -142,9 +144,9 @@ uvicorn app:app --host 127.0.0.1 --port 7000
 Open `http://localhost:7000`, log in with the generated admin password,
 and configure everything else inside **Settings**.
 
-**Cookbook on Windows:** connect **Ollama** at `http://localhost:11434/v1` (Ollama **0.30+** required for recent models). The Download tab searches the Ollama library, ranks models for your GPU, and pulls with one click. The Serve tab lists Hugging Face cache **and** local Ollama models.
+**Cookbook on Windows:** connect **Ollama** at `http://localhost:11434/v1` (Ollama **0.30+** required for recent models). The Download tab searches the Ollama library, ranks models for your GPU, and pulls with one click. The Serve tab lists Hugging Face cache **and** local Ollama models. Use the **⋮** menu on a model to delete it from disk; the chat model picker refreshes automatically. Stop a running serve task first if Windows has the model files locked.
 
-**Port 7000 already in use:** close other Odysseus windows first. If restarts left orphan listeners behind, stop stale Python workers:
+**Port 7000 already in use:** close other NeatAi windows first. If restarts left orphan listeners behind, stop stale Python workers:
 
 ```powershell
 Get-NetTCPConnection -LocalPort 7000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }
@@ -153,7 +155,7 @@ Get-NetTCPConnection -LocalPort 7000 -State Listen | ForEach-Object { Stop-Proce
 Avoid `--reload` on Windows for long-running sessions; repeated reload restarts can stack workers on the same port.
 
 ## Security Notes
-Odysseus is a self-hosted workspace with powerful local tools: shell access, file uploads, model downloads, web research, email/calendar integrations, and API tokens. Treat it like an admin console.
+NeatAi is a self-hosted workspace with powerful local tools: shell access, file uploads, model downloads, web research, email/calendar integrations, and API tokens. Treat it like an admin console.
 
 - Keep `AUTH_ENABLED=true` for any network-accessible deployment.
 - Do not expose it directly to the public internet without HTTPS and a trusted reverse proxy.
@@ -166,12 +168,12 @@ Odysseus is a self-hosted workspace with powerful local tools: shell access, fil
 - Before publishing a fork, run `git status --short` and confirm no private files from `.env`, `data/`, `logs/`, uploads, backups, or local databases are staged.
 
 ### Putting it behind HTTPS
-Odysseus serves plain HTTP on its port. That's fine for `localhost` and trusted LAN/VPN use, but browsers will warn ("Password fields present on an insecure page") and the login + API tokens travel in cleartext. For anything reachable outside your machine — including a Tailscale IP shared with other devices — put a TLS-terminating reverse proxy in front.
+NeatAi serves plain HTTP on its port. That's fine for `localhost` and trusted LAN/VPN use, but browsers will warn ("Password fields present on an insecure page") and the login + API tokens travel in cleartext. For anything reachable outside your machine — including a Tailscale IP shared with other devices — put a TLS-terminating reverse proxy in front.
 
 Shortest path with [Caddy](https://caddyserver.com/) (auto-renews Let's Encrypt certs):
 
 ```caddy
-odysseus.example.com {
+neatai.example.com {
   reverse_proxy localhost:7000
 }
 ```
@@ -204,12 +206,23 @@ Key settings:
 ### Bundled services
 Docker Compose includes these by default:
 
-  - **ChromaDB** → vector store for semantic memory. In Docker, Odysseus connects to `chromadb:8000`; from the host it is exposed as `localhost:8100`.
-  - **SearXNG** → meta search for web search. In Docker, Odysseus connects to `searxng:8080`; from the host it is exposed only on `127.0.0.1:8080`.
+  - **ChromaDB** → vector store for semantic memory. In Docker, NeatAi connects to `chromadb:8000`; from the host it is exposed as `localhost:8100`.
+  - **SearXNG** → meta search for web search. In Docker, NeatAi connects to `searxng:8080`; from the host it is exposed only on `127.0.0.1:8080`.
   - **ntfy** → local notification service, exposed as `localhost:8091`.
 
 ### Optional external services
   - **Ollama** → local LLM server -- [ollama.ai](https://ollama.ai)
+
+## CLI
+Headless helpers live in `scripts/` and mirror many in-app features:
+
+```bash
+./scripts/neatai --help
+./scripts/neatai-sessions list
+./scripts/neatai-cookbook status
+```
+
+Shell completion: `scripts/_completion/neatai.bash` or `neatai.zsh`.
 
 ## Architecture
 ```
@@ -221,6 +234,7 @@ services/  docs, memory, search, hwfit (Cookbook), ollama_library …
 src/       workspace_sandbox, workspace_service (Agent Workspace)
 static/    index.html + app.js + style.css + js/ (modular front-end)
 docs/      landing page (index.html) + preview clips
+scripts/   neatai CLI wrappers (backup, mail, cookbook, sessions, …)
 ```
 
 ## Data

@@ -1,6 +1,6 @@
 @echo off
 
-title Odysseus
+title NeatAi
 
 cd /d "%~dp0"
 
@@ -20,7 +20,7 @@ if not exist "venv\Scripts\python.exe" (
 
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":7000" ^| findstr "LISTENING"') do (
 
-    echo Port 7000 is already in use. Close the other Odysseus window first, or run:
+    echo Port 7000 is already in use. Close the other NeatAi window first, or run:
 
     echo   taskkill /PID %%a /F
 
@@ -32,7 +32,7 @@ for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":7000" ^| findstr "LISTENING
 
 
 
-echo Starting Odysseus...
+echo Starting NeatAi...
 
 echo.
 

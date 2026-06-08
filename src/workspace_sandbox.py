@@ -68,7 +68,14 @@ def read_text_file(path: Path, max_chars: int = 200_000) -> str:
     return data
 
 
-def build_tree(root: Path, *, max_depth: int = 8, _depth: int = 0) -> List[Dict[str, Any]]:
+def build_tree(
+    root: Path,
+    *,
+    base: Optional[Path] = None,
+    max_depth: int = 8,
+    _depth: int = 0,
+) -> List[Dict[str, Any]]:
+    project_root = base or root
     if _depth > max_depth or not root.exists():
         return []
     items: List[Dict[str, Any]] = []
@@ -79,13 +86,15 @@ def build_tree(root: Path, *, max_depth: int = 8, _depth: int = 0) -> List[Dict[
     for entry in entries:
         if entry.name.startswith("."):
             continue
-        rel = entry.relative_to(root).as_posix()
+        rel = entry.relative_to(project_root).as_posix()
         if entry.is_dir():
             items.append({
                 "name": entry.name,
                 "path": rel,
                 "type": "dir",
-                "children": build_tree(entry, max_depth=max_depth, _depth=_depth + 1),
+                "children": build_tree(
+                    entry, base=project_root, max_depth=max_depth, _depth=_depth + 1,
+                ),
             })
         else:
             try:

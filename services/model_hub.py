@@ -223,6 +223,75 @@ async def activate_model(model_id: str) -> dict[str, Any]:
     }
 
 
+def _clear_active_config() -> None:
+    path = bundled_llm.models_dir() / "active.json"
+    if path.is_file():
+        path.unlink()
+
+
+async def delete_model(model_id: str) -> dict[str, Any]:
+    """Remove a downloaded bundled GGUF from disk."""
+    entry = get_catalog_entry(model_id)
+    if not entry:
+        return {"ok": False, "error": f"Unknown model: {model_id}"}
+
+    if model_id in _running:
+        return {"ok": False, "error": "Download in progress — wait for it to finish"}
+
+    filename = str(entry["file"])
+    dest = bundled_llm.models_dir() / filename
+    if not dest.is_file():
+        _downloads.pop(model_id, None)
+        bundled_llm.sync_endpoint_models()
+        bundled_llm._invalidate_models_cache()
+        return {"ok": True, "deleted": filename, "message": "Already removed", **get_hub_status()}
+
+    active = bundled_llm.get_active_model_config()
+    was_active = active.get("file") == filename
+
+    if was_active:
+        bundled_llm.stop_server()
+
+    try:
+        dest.unlink()
+    except OSError as e:
+        return {"ok": False, "error": f"Could not delete file: {e}"}
+
+    _downloads.pop(model_id, None)
+
+    if was_active:
+        remaining = [item for item in list_installed() if item["file"] != filename]
+        if remaining:
+            next_file = remaining[0]["file"]
+            switched = False
+            for cat in _catalog_models():
+                if str(cat.get("file", "")) == next_file:
+                    result = await activate_model(str(cat["id"]))
+                    if result.get("ok"):
+                        switched = True
+                    break
+            if not switched:
+                bundled_llm.set_active_model_config(
+                    model_id=next_file,
+                    repo="",
+                    file=next_file,
+                )
+                await bundled_llm.start_server()
+                bundled_llm.register_endpoint()
+        else:
+            _clear_active_config()
+            bundled_llm._set_status(
+                state="idle",
+                progress=0,
+                message="No bundled model installed",
+                error=None,
+            )
+
+    bundled_llm.sync_endpoint_models()
+    bundled_llm._invalidate_models_cache()
+    return {"ok": True, "deleted": filename, **get_hub_status()}
+
+
 async def activate_model_by_path(model_path: str) -> dict[str, Any]:
     """Switch bundled AI to an installed model by its picker path/id."""
     filename = Path(model_path).name

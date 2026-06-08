@@ -14,7 +14,7 @@ from typing import Any
 
 _SEARCH_URL = "https://ollama.com/search"
 _LIBRARY_URL = "https://ollama.com/library"
-_USER_AGENT = "Odysseus/1.0 (+https://github.com/odysseus)"
+_USER_AGENT = "NeatAi/1.0 (+https://github.com/neatai)"
 _SIZE_TAG_RE = re.compile(r"^(\d+(?:\.\d+)?[bB]|latest)$")
 _CAP_TAG_RE = re.compile(r"^(vision|tools|thinking|cloud|embedding)$", re.I)
 _CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}

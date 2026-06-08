@@ -1,12 +1,12 @@
-# Odysseus turnkey installer — local AI included, no Docker or Ollama required.
+# NeatAi turnkey installer — local AI included, no Docker or Ollama required.
 # Right-click -> Run with PowerShell (or run from an ordinary terminal).
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 Write-Host ""
-Write-Host "=== Odysseus Turnkey Setup ===" -ForegroundColor Cyan
-Write-Host "This installs Odysseus plus a built-in local AI (Qwen2.5 3B, ~2 GB download)."
+Write-Host "=== NeatAi Turnkey Setup ===" -ForegroundColor Cyan
+Write-Host "This installs NeatAi plus a built-in local AI (Qwen2.5 3B, ~2 GB download)."
 Write-Host ""
 
 $py312 = $null
@@ -57,5 +57,5 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Green
-Write-Host "Double-click 'Start Odysseus.bat' or run: .\run-native.ps1"
+Write-Host "Double-click 'Start NeatAi.bat' or run: .\run-native.ps1"
 Write-Host ""

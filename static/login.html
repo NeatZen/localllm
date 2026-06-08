@@ -3,8 +3,27 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual">
-<title>Odysseus — Login</title>
+<title>NeatAi — Login</title>
+<link rel="icon" type="image/png" href="/static/neatai-logo1.png">
 <script nonce="{{CSP_NONCE}}">
+(function(){
+  try {
+    if (!localStorage.getItem('neatai-storage-migrated-v1')) {
+      var toRemove = [];
+      for (var mi = 0; mi < localStorage.length; mi++) {
+        var mk = localStorage.key(mi);
+        if (!mk) continue;
+        var mn = null;
+        if (mk.indexOf('odysseus-') === 0) mn = 'neatai-' + mk.slice(9);
+        else if (mk.indexOf('odysseus.') === 0) mn = 'neatai.' + mk.slice(9);
+        if (mn && localStorage.getItem(mn) === null) localStorage.setItem(mn, localStorage.getItem(mk));
+        if (mn) toRemove.push(mk);
+      }
+      toRemove.forEach(function(k){ localStorage.removeItem(k); });
+      localStorage.setItem('neatai-storage-migrated-v1', '1');
+    }
+  } catch(e){}
+})();
 (function(){
   // Per-theme bg-effect defaults — mirrors THEME_DEFAULT_* maps in
   // static/js/theme.js so login picks the same default pattern as the
@@ -20,7 +39,7 @@
   };
   var THEME_DEFAULT_INTENSITY = { midnight:0.5, terminal:0.8, organs:0.65 };
   try {
-    var t = JSON.parse(localStorage.getItem('odysseus-theme'));
+    var t = JSON.parse(localStorage.getItem('neatai-theme'));
     var s = document.documentElement.style;
     if (t && t.colors) {
       var c = t.colors;
@@ -85,7 +104,7 @@
   @font-face { font-family: 'Fira Code'; font-weight: 400; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-Regular.woff2') format('woff2'); }
   @font-face { font-family: 'Fira Code'; font-weight: 600; font-style: normal; font-display: swap; src: url('/static/fonts/FiraCode-SemiBold.woff2') format('woff2'); }
   /* Mirror the main app's :root defaults (static/style.css ~line 18) so an
-     uncustomized theme — or a fresh browser with no `odysseus-theme` in
+     uncustomized theme — or a fresh browser with no `neatai-theme` in
      localStorage — renders the login page in the same palette as the rest
      of the app instead of a different greys+offwhite scheme. */
   :root {
@@ -134,7 +153,7 @@
     font-family: 'Fira Code', monospace;
     font-size: 2rem; font-weight: 600;
     letter-spacing: 0.04em;
-    /* Same gradient as the main app's welcome-screen "Odysseus" title
+    /* Same gradient as the main app's welcome-screen "NeatAi" title
        (static/style.css #welcome-screen .welcome-name) so the brand
        wordmark is consistent across login + first-launch screens. */
     background: linear-gradient(135deg, var(--brand-color, var(--red)), color-mix(in srgb, var(--brand-color, var(--red)) 60%, var(--fg)));
@@ -200,7 +219,7 @@
   .remember-toggle:hover .remember-dot {
     border-color: color-mix(in srgb, var(--fg) 40%, transparent);
   }
-  .logo-boat { width: 1.6rem; height: 1.6rem; margin-right: 0.4rem; vertical-align: -0.15em; color: var(--red); }
+  .login-logo { display: block; max-width: min(240px, 90vw); height: auto; margin: 0 auto; }
   .version-label {
     position: fixed; bottom: 12px; right: 16px;
     font-size: 0.7rem; opacity: 0.25;
@@ -225,7 +244,7 @@
 <body>
 <div class="card">
   <div class="logo">
-    <svg class="logo-boat" viewBox="0 0 32 32"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg><span>Odysseus</span>
+    <img src="/static/neatai-logo1.png" alt="NeatAi" class="login-logo">
   </div>
   <p class="setup-note" id="setupNote" style="display:none"></p>
 
@@ -283,7 +302,7 @@
 
   // Prefill last username
   const usernameInput = document.getElementById('username');
-  const savedUser = localStorage.getItem('odysseus-last-user');
+  const savedUser = localStorage.getItem('neatai-last-user');
   if (savedUser && usernameInput) {
     usernameInput.value = savedUser;
     document.getElementById('password').focus();
@@ -442,8 +461,8 @@
     const remember = document.getElementById('remember').checked;
     function finishLogin() {
       const _rem = document.getElementById('remember').checked;
-      if (_rem) localStorage.setItem('odysseus-last-user', username);
-      else localStorage.removeItem('odysseus-last-user');
+      if (_rem) localStorage.setItem('neatai-last-user', username);
+      else localStorage.removeItem('neatai-last-user');
       sessionStorage.removeItem('ody-session-active');
       submitBtn.innerHTML = '<span class="login-spinner" aria-hidden="true"></span>';
       submitBtn.disabled = true;

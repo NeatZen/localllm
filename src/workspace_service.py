@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import difflib
 import logging
 import os
+import re
+import sys
+import threading
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,6 +29,10 @@ from src.workspace_sandbox import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Commands run in a background thread after approval so the HTTP handler returns
+# immediately. Long-running or interactive shells would otherwise freeze the UI.
+RUN_COMMAND_TIMEOUT = int(os.environ.get("NEATAI_WORKSPACE_CMD_TIMEOUT", "300"))
 
 
 def get_workspace_context(session_id: Optional[str]) -> Optional[WorkspaceContext]:
@@ -118,7 +126,7 @@ def create_project(owner: str, name: str, slug: Optional[str] = None) -> Dict[st
         (root / "notes").mkdir(exist_ok=True)
         readme = root / "README.md"
         if not readme.exists():
-            readme.write_text(f"# {name}\n\nCreated by Odysseus Agent Workspace.\n", encoding="utf-8")
+            readme.write_text(f"# {name}\n\nCreated by NeatAi Agent Workspace.\n", encoding="utf-8")
         pid = uuid.uuid4().hex[:12]
         proj = WorkspaceProject(
             id=pid,
@@ -168,7 +176,7 @@ def bind_session_to_project(session_id: str, project_id: str, owner: str) -> Opt
         if not proj or not sess:
             return None
         sess.workspace_project_id = project_id
-        sess.mode = sess.mode or "agent"
+        sess.mode = "chat"
         proj.session_id = session_id
         db.commit()
         return proj.to_dict()
@@ -195,6 +203,55 @@ def read_project_file(project_id: str, owner: str, rel_path: str) -> Dict[str, A
     if not path.is_file():
         raise FileNotFoundError(rel_path)
     return {"path": rel_path, "content": read_text_file(path)}
+
+
+def write_project_file(project_id: str, owner: str, rel_path: str, content: str) -> Dict[str, Any]:
+    """Save file content directly (user editor — no approval queue)."""
+    proj = get_project_for_owner(project_id, owner)
+    if not proj:
+        raise FileNotFoundError("Project not found")
+    ctx = WorkspaceContext(project_id=proj.id, owner=owner, root_path=Path(proj.root_path))
+    path = resolve_workspace_path(ctx, rel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content or "", encoding="utf-8")
+    rel = path.relative_to(ctx.root_path.resolve()).as_posix()
+    log_activity(
+        project_id,
+        "edit",
+        f"Saved {rel}",
+        meta={"path": rel, "bytes": len(content or "")},
+    )
+    return {"path": rel, "content": content or "", "saved": True}
+
+
+def create_project_folder(project_id: str, owner: str, rel_path: str) -> Dict[str, Any]:
+    proj = get_project_for_owner(project_id, owner)
+    if not proj:
+        raise FileNotFoundError("Project not found")
+    ctx = WorkspaceContext(project_id=proj.id, owner=owner, root_path=Path(proj.root_path))
+    path = resolve_workspace_path(ctx, rel_path)
+    path.mkdir(parents=True, exist_ok=True)
+    rel = path.relative_to(ctx.root_path.resolve()).as_posix()
+    log_activity(project_id, "edit", f"Created folder {rel}", meta={"path": rel})
+    return {"path": rel, "type": "dir"}
+
+
+def delete_project_path(project_id: str, owner: str, rel_path: str) -> Dict[str, Any]:
+    import shutil
+
+    proj = get_project_for_owner(project_id, owner)
+    if not proj:
+        raise FileNotFoundError("Project not found")
+    ctx = WorkspaceContext(project_id=proj.id, owner=owner, root_path=Path(proj.root_path))
+    path = resolve_workspace_path(ctx, rel_path)
+    if not path.exists():
+        raise FileNotFoundError(rel_path)
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+    log_activity(project_id, "edit", f"Deleted {rel_path}", meta={"path": rel_path})
+    return {"path": rel_path, "deleted": True}
 
 
 def list_pending_changes(project_id: str, owner: str) -> List[Dict[str, Any]]:
@@ -394,6 +451,20 @@ def apply_change(change_id: str, owner: str) -> Dict[str, Any]:
             root_path=Path(proj.root_path),
             session_id=change.session_id,
         )
+        if change.action_type == "run":
+            cmd = (change.payload or {}).get("command") or ""
+            change.status = "applied"
+            db.commit()
+            db.refresh(change)
+            log_activity(
+                proj.id,
+                "applied",
+                change.summary or change.action_type,
+                session_id=change.session_id,
+                meta={"change_id": change.id, "command": cmd[:500]},
+            )
+            _schedule_run_command(ctx, cmd, change.id)
+            return change.to_dict()
         result = _apply_change_row(change, ctx)
         change.status = "applied"
         if result.get("test_summary"):
@@ -413,6 +484,43 @@ def apply_change(change_id: str, owner: str) -> Dict[str, Any]:
         raise
     finally:
         db.close()
+
+
+def _schedule_run_command(ctx: WorkspaceContext, command: str, change_id: str) -> None:
+    """Run an approved shell command off the request thread."""
+
+    def _worker() -> None:
+        try:
+            result = _run_command_sync(ctx, command, change_id=change_id)
+            summary = result.get("test_summary")
+            if not summary:
+                return
+            db = SessionLocal()
+            try:
+                row = db.query(WorkspaceChange).filter(WorkspaceChange.id == change_id).first()
+                if row:
+                    row.test_summary = summary
+                    db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning("workspace test_summary update failed: %s", exc)
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.exception("workspace command failed for change %s", change_id)
+            log_activity(
+                ctx.project_id,
+                "command",
+                f"Command failed: {exc}",
+                session_id=ctx.session_id,
+                meta={"change_id": change_id, "command": command[:500]},
+            )
+
+    threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"ws-cmd-{change_id}",
+    ).start()
 
 
 def _apply_change_row(change: WorkspaceChange, ctx: WorkspaceContext) -> Dict[str, Any]:
@@ -442,16 +550,27 @@ def _apply_change_row(change: WorkspaceChange, ctx: WorkspaceContext) -> Dict[st
 def _run_command_sync(ctx: WorkspaceContext, command: str, *, change_id: str = "") -> Dict[str, Any]:
     import subprocess
 
-    env = {**os.environ, "ODYSSEUS_WORKSPACE": str(ctx.root_path), "TERM": "xterm-256color"}
-    proc = subprocess.run(
-        command,
-        shell=True,
-        cwd=str(ctx.root_path),
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=3600,
-    )
+    env = {**os.environ, "NEATAIEUS_WORKSPACE": str(ctx.root_path), "TERM": "xterm-256color"}
+    py_code = _extract_python_c_code(command)
+    if py_code is not None:
+        proc = subprocess.run(
+            [_python_executable(), "-I", "-c", py_code],
+            cwd=str(ctx.root_path),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=RUN_COMMAND_TIMEOUT,
+        )
+    else:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(ctx.root_path),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=RUN_COMMAND_TIMEOUT,
+        )
     out = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
     parsed = parse_test_output(out)
     log_activity(
@@ -514,8 +633,14 @@ def reject_change(change_id: str, owner: str, reason: Optional[str] = None) -> D
 def approve_all_pending(project_id: str, owner: str) -> List[Dict[str, Any]]:
     pending = list_pending_changes(project_id, owner)
     applied = []
+    errors = []
     for ch in pending:
-        applied.append(apply_change(ch["id"], owner))
+        try:
+            applied.append(apply_change(ch["id"], owner))
+        except ValueError as exc:
+            errors.append({"change_id": ch["id"], "error": str(exc)})
+    if errors and not applied:
+        raise ValueError(errors[0]["error"])
     return applied
 
 
@@ -549,6 +674,74 @@ def get_plan(project_id: str, owner: str) -> Optional[dict]:
         return json.loads(proj.plan_json)
     except json.JSONDecodeError:
         return None
+
+
+def _guess_script_path(content: str) -> Optional[str]:
+    """If python tool content looks like a file, return a relative path."""
+    text = content.strip()
+    if not text:
+        return None
+    lines = text.splitlines()
+    if lines and lines[0].strip().startswith("#"):
+        hint = lines[0].strip()[1:].strip()
+        token = (hint.split()[0] if hint else "").lstrip("./")
+        if token and re.match(r"^[\w./-]+\.\w+$", token):
+            return token.replace("\\", "/")
+    lower = text.lower()
+    if len(lines) >= 2 and any(
+        ln.lstrip().startswith(("import ", "from ", "def ", "class ", "@app.", "app = "))
+        for ln in lines[:12]
+    ):
+        if "flask" in lower or "fastapi" in lower or "@app.route" in text:
+            return "app.py"
+        if "requirements" in lower or re.search(r"^[\w.-]+(==|>=|<=|~=)", text, re.M):
+            return "requirements.txt"
+        return "main.py"
+    return None
+
+
+def _python_executable() -> str:
+    return sys.executable or "python"
+
+
+def _extract_python_c_code(command: str) -> Optional[str]:
+    """Parse `python -c ...` out of a queued shell command (Windows-safe)."""
+    stripped = (command or "").strip()
+    if not stripped:
+        return None
+    m = re.match(
+        r"^(?:(?:python3|python|py)|(?:[\w.:\\/ -]+[\\/]python(?:3)?(?:\.exe)?))\s+(?:-I\s+)?-c\s+(.+)$",
+        stripped,
+        re.I | re.S,
+    )
+    if not m:
+        return None
+    rest = m.group(1).strip()
+    if not rest:
+        return None
+    if rest[0] in "'\"":
+        try:
+            return ast.literal_eval(rest)
+        except (SyntaxError, ValueError):
+            pass
+    return rest
+
+
+def intercept_python(ctx: WorkspaceContext, content: str) -> Tuple[str, Dict[str, Any]]:
+    """Workspace python tool: propose files for scripts, queue short code as python -c."""
+    text = content or ""
+    path = _guess_script_path(text)
+    if path:
+        body = text
+        lines = text.splitlines()
+        if lines and lines[0].strip().startswith("#"):
+            hint = lines[0].strip()[1:].strip().split()[0].lstrip("./")
+            if hint and path == hint.replace("\\", "/"):
+                body = "\n".join(lines[1:]).lstrip("\n")
+        return intercept_write_file(ctx, path, body)
+    exe = _python_executable()
+    wrapped = f"{exe} -I -c {repr(text)}"
+    return intercept_bash(ctx, wrapped)
 
 
 def intercept_write_file(ctx: WorkspaceContext, path: str, body: str) -> Tuple[str, Dict[str, Any]]:
@@ -587,7 +780,7 @@ def ensure_workspace_session(project_id: str, owner: str) -> Dict[str, Any]:
             sess = db.query(Session).filter(Session.id == proj.session_id).first()
             if sess:
                 sess.workspace_project_id = project_id
-                sess.mode = "agent"
+                sess.mode = "chat"
                 db.commit()
                 try:
                     from src.ai_interaction import get_session_manager
@@ -644,7 +837,7 @@ def ensure_workspace_session(project_id: str, owner: str) -> Dict[str, Any]:
             endpoint_url=ep.base_url,
             model=model,
             owner=owner,
-            mode="agent",
+            mode="chat",
             workspace_project_id=project_id,
         )
         db.add(sess)

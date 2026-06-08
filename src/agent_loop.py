@@ -1,7 +1,7 @@
 """
 agent_loop.py
 
-Streaming agent loop for odysseus-ui.
+Streaming agent loop for neatai-ui.
 Wraps stream_llm() with multi-round tool execution.
 The LLM decides when to use tools by writing fenced code blocks.
 """
@@ -132,7 +132,7 @@ _API_AGENT_RULES = """\
 - Plain "list/show/check my inbox/emails" means latest inbox mail, including read messages. Do not set `unread_only: true` unless the user explicitly asks for unread/needs attention.
 - Multiple email accounts: if tool output says "Other accounts" or the user asks "my Gmail?", "other inbox?", "work mail?", "custom domain mail?", or names any mailbox/account, DO NOT answer from memory or infer it is the same inbox. Call `list_email_accounts` if needed, then call `list_emails`/`read_email`/`bulk_email` with the exact `account` value for that mailbox. Account names are user-defined labels; if the user typo-matches a known account, use the closest listed account instead of claiming it does not exist. NEVER use `app_api` or `/api/email/accounts` to discover email accounts; that route is owner-filtered in tool context and can falsely return empty.
 - User identity facts/preferences ("my name is <name>", "I live in <place>", "I prefer concise replies", "call me <name>") → use `manage_memory` with action=add. NEVER use `manage_contact` for facts about the user unless the user explicitly says to create/update a contact and provides contact details such as an email or phone.
-- You are running INSIDE Odysseus — there is no OpenWebUI, ChatGPT, or external chat backend to query. All chats/sessions live in THIS app and are accessed via `list_sessions` (or `manage_session` with `action=list`), and deleted via `manage_session` with `action=delete`. Do NOT shell out to find sqlite files, curl localhost:8080, or grep for routers — those don't exist here. If `list_sessions` returns rows, that IS the source of truth.
+- You are running INSIDE NeatAi — there is no OpenWebUI, ChatGPT, or external chat backend to query. All chats/sessions live in THIS app and are accessed via `list_sessions` (or `manage_session` with `action=list`), and deleted via `manage_session` with `action=delete`. Do NOT shell out to find sqlite files, curl localhost:8080, or grep for routers — those don't exist here. If `list_sessions` returns rows, that IS the source of truth.
 - After `list_sessions`, preserve the returned `[Chat title](#session-<id>)` links in your user-facing reply. Do not rewrite chat lists as plain tables with non-clickable titles.
 - "Cookbook" = the LLM-serving subsystem (NOT chat sessions, NOT a recipe app). Routing:
   • "What's running" / "what's serving" / "show my cookbook" / "is anything up" → **first action MUST be `list_served_models` (no args)**. The tool is ALWAYS available. Do not run `ps aux`, do not `curl localhost:8000`, do not `which vllm`. Even if you don't remember seeing the tool listed, it IS available — call it. The output IS the source of truth (it tracks diffusion models, vLLM, SGLang, llama.cpp, Ollama, etc. — anything spawned via the cookbook, including remote hosts that `ps aux` here can't see).
@@ -168,23 +168,21 @@ _API_AGENT_RULES = """\
   - Listing sessions: "1. [Big Chat](#session-abc123) — 2h ago, 2. [Code Review](#session-def456) — 5h ago\""""
 
 _WORKSPACE_RULES = """\
-## Agent Workspace mode — YOU ARE A CODING AGENT IN A PROJECT FOLDER
+## Agent Workspace mode — YOU ARE A CODING ASSISTANT (USER WRITES THE CODE)
 
-This chat is bound to a **workspace project** on disk. Your job is to **do the work** (create/edit files, run approved commands), not to chat about code.
+This chat is bound to a **workspace project** on disk. The **user edits files directly** in the Workspace editor (+ File, Save). Your job is to **help via chat**: explain, review, debug, suggest snippets — not to silently rewrite the project.
 
 ### Non-negotiable rules
-1. **NEVER paste code blocks in chat** for the user to copy. ALWAYS use `write_file` to create/update project files (queued for user approval in the Workspace panel).
-2. **NEVER use `create_document`** for project code — that saves to the in-app document editor, NOT the workspace folder.
-3. When the user asks to build, create, add, fix, or scaffold anything → **immediately call `write_file`** (one call per file). Do not ask "shall I create the files?" — just propose them.
-4. Work ONLY inside the project root with relative paths (`README.md`, `index.html`, `src/app.js`).
-5. Use `list_workspace_files` first if you need to see what already exists.
-6. Shell commands (`bash`/`python`) also require approval — use them for installs, builds, and tests after files exist.
-7. After proposing changes, tell the user: **"Approve the pending changes in Agent Workspace"** (they appear in the Workspace panel).
-8. Prefer `README.md` and `docs/setup.md` for new projects. Use `create_workspace_plan` for large multi-step builds.
+1. **Do NOT use `write_file` or `propose_file_change`** unless the user explicitly asks you to propose a patch for them to review.
+2. **NEVER paste large code blocks as a substitute for files** — tell the user which file to create/edit and what to put in it, or offer a short snippet they can copy into the editor.
+3. **NEVER use `create_document`** for project code — that is the in-app document editor, not the workspace folder.
+4. Use `list_workspace_files` and `read_file` to inspect what the user has built. Give concrete feedback on their actual files.
+5. Shell commands (`bash`) still require approval — use only when the user asks to run installs, builds, or tests.
+6. Prefer answering in chat: "Add this to `app.py`:" with a focused snippet, not a dozen queued changes.
 
 ### Example (correct behavior)
-User: "Build a dividend scanner landing page"
-You: call `write_file` for `index.html`, `styles.css`, update `README.md` — then say files are queued for approval."""
+User: "Help me build a Flask /api/dividends endpoint"
+You: inspect their files with `read_file`, then explain what to add to `app.py` and `requirements.txt` in the editor. Offer to review after they save."""
 
 # Each tool section is keyed by tool name(s) it covers.
 # Sections with multiple tools use a tuple key.
@@ -199,14 +197,14 @@ For LONG-running commands (package installs, pip/npm, ffmpeg, model downloads, t
 #!bg
 pip install openai-whisper
 ```
-SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the Odysseus UI — no need to copy files out.
+SANDBOX LIMITS: stdin/stdout are pipes, so there is NO interactive terminal — `input()`, `curses`, `termios`, `pygame`, and `tkinter` will all fail. Don't try to RUN interactive terminal games or GUI apps here — verify syntax (`python -c "import py_compile; py_compile.compile('x.py')"`) and tell the user to run it themselves in their own terminal. For anything the USER should play/use interactively (games, UIs, demos), prefer a single self-contained HTML file with `<canvas>` + inline JS — save it via `create_document` with language="html" and tell the user to hit the Run / Preview button (▶) in the document editor toolbar; it renders inline in a sandboxed iframe so the game is playable right there. Works from any machine that can reach the NeatAi UI — no need to copy files out.
 NEVER pipe multi-line Python through `python -c "..."` — shell quoting eats real newlines and `\\n` arrives as literal backslash-n, which Python parses as a line-continuation error on line 1. To run multi-line code, either use the dedicated `python` tool block above, or save to a file first with a quoted HEREDOC (`cat > /tmp/x.py << 'EOF' ... EOF`) and then `python /tmp/x.py`.""",
 
     "python": """\
 ```python
 <python code>
 ```
-Execute Python code. Use for computation, data processing, scripting. NOT for writing code for the user (use create_document for that). Same sandbox limits as bash — no TTY, no GUI, no `input()`; for anything the user should interact with, generate a single HTML file with inline JS instead.""",
+Execute Python code for quick calculations or one-liners. **In Agent Workspace mode, do NOT use this to create apps or files** — use `write_file` instead (line 1 = path, rest = content). Same sandbox limits as bash — no TTY, no GUI, no `input()`.""",
 
     "web_search": """\
 ```web_search
@@ -378,7 +376,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
 ```app_api
 {"action": "call", "method": "GET", "path": "/api/cookbook/gpus"}
 ```
-GENERIC LOOPBACK to ANY Odysseus internal endpoint. Use this whenever the user wants something the UI can do but there's NO named tool for it. Every UI button hits some /api/* endpoint — you can hit the same one. Auth is handled automatically.
+GENERIC LOOPBACK to ANY NeatAi internal endpoint. Use this whenever the user wants something the UI can do but there's NO named tool for it. Every UI button hits some /api/* endpoint — you can hit the same one. Auth is handled automatically.
 
 **Discovery first.** If you're not sure of the path, call `{"action":"endpoints","filter":"<keyword>"}` (e.g. filter='calendar' or 'gallery' or 'theme') to list available endpoints with their methods + summaries. Then call with action='call'.
 
@@ -1840,11 +1838,10 @@ async def stream_agent_loop(
                             messages.append({
                                 "role": "system",
                                 "content": (
-                                    "You have NOT created any project files yet. "
-                                    "Use a ```write_file``` block now: line 1 = relative path "
-                                    "(e.g. index.html), remaining lines = file content. "
-                                    "One block per file. Do NOT paste code in chat or say "
-                                    "only 'Done' — propose files for user approval."
+                                    "The user edits project files in the Workspace editor. "
+                                    "Do NOT call write_file unless they asked for a proposed patch. "
+                                    "Use read_file / list_workspace_files to inspect their work, "
+                                    "then give clear guidance in chat about what to add or fix."
                                 ),
                             })
                             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'

@@ -17,7 +17,9 @@ from src.workspace_service import (
     apply_change,
     bind_session_to_project,
     create_project,
+    create_project_folder,
     delete_project,
+    delete_project_path,
     ensure_workspace_session,
     get_file_tree,
     get_plan,
@@ -30,6 +32,7 @@ from src.workspace_service import (
     read_project_file,
     reject_change,
     save_plan,
+    write_project_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,15 @@ class BrowserTestRequest(BaseModel):
 class ProposeCommandRequest(BaseModel):
     command: str = Field(..., min_length=1)
     summary: Optional[str] = None
+
+
+class FileWriteRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=512)
+    content: str = ""
+
+
+class FolderCreateRequest(BaseModel):
+    path: str = Field(..., min_length=1, max_length=512)
 
 
 def setup_workspace_routes() -> APIRouter:
@@ -103,6 +115,36 @@ def setup_workspace_routes() -> APIRouter:
             return read_project_file(project_id, owner, path)
         except FileNotFoundError:
             raise HTTPException(404, "File not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @router.put("/api/workspace/projects/{project_id}/file")
+    async def api_save_project_file(request: Request, project_id: str, body: FileWriteRequest):
+        owner = _owner(request)
+        try:
+            return {"ok": True, **write_project_file(project_id, owner, body.path, body.content)}
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @router.post("/api/workspace/projects/{project_id}/folder")
+    async def api_create_project_folder(request: Request, project_id: str, body: FolderCreateRequest):
+        owner = _owner(request)
+        try:
+            return {"ok": True, **create_project_folder(project_id, owner, body.path)}
+        except FileNotFoundError:
+            raise HTTPException(404, "Project not found")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @router.delete("/api/workspace/projects/{project_id}/file")
+    async def api_delete_project_file(request: Request, project_id: str, path: str):
+        owner = _owner(request)
+        try:
+            return {"ok": True, **delete_project_path(project_id, owner, path)}
+        except FileNotFoundError:
+            raise HTTPException(404, "Not found")
         except ValueError as e:
             raise HTTPException(400, str(e))
 

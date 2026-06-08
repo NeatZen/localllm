@@ -1,7 +1,7 @@
 """Built-in local LLM for turnkey installs (llama-cpp-python, no Ollama).
 
 Downloads a default GGUF model on first run, serves it on a fixed local port,
-and registers an OpenAI-compatible endpoint in Odysseus automatically.
+and registers an OpenAI-compatible endpoint in NeatAi automatically.
 """
 
 from __future__ import annotations
@@ -316,7 +316,7 @@ def _resolve_n_gpu_layers() -> str:
 
 
 def _kill_orphaned_server_processes() -> None:
-    """Stop leftover llama_cpp.server processes from prior Odysseus runs."""
+    """Stop leftover llama_cpp.server processes from prior NeatAi runs."""
     global _process
     port_flag = f"--port {BUNDLED_LLM_PORT}"
     keep_pid = _process.pid if _process is not None and _process.poll() is None else None

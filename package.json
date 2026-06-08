@@ -1,4 +1,5 @@
 {
+  "name": "neatai-ui",
   "devDependencies": {
     "@antithesishq/bombadil": "^0.3.2"
   },

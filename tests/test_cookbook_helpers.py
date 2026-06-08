@@ -4,7 +4,13 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
-from routes.cookbook_helpers import _safe_env_prefix, _validate_gpus, _validate_ssh_port, windows_powershell_exe
+from routes.cookbook_helpers import (
+    _safe_env_prefix,
+    _validate_cache_repo_id,
+    _validate_gpus,
+    _validate_ssh_port,
+    windows_powershell_exe,
+)
 
 
 def test_safe_env_prefix_accepts_quoted_venv_path():
@@ -41,6 +47,22 @@ def test_validate_gpus_accepts_indexes_only():
     assert _validate_gpus("0,1,2") == "0,1,2"
     with pytest.raises(HTTPException):
         _validate_gpus("0; rm -rf /")
+
+
+def test_validate_cache_repo_id_accepts_ollama_refs():
+    assert _validate_cache_repo_id("gemma:latest", is_ollama=True) == "gemma:latest"
+    assert _validate_cache_repo_id("qwen2.5-3b-heretic:latest", is_ollama=True) == "qwen2.5-3b-heretic:latest"
+    assert _validate_cache_repo_id("library/gemma:2b", is_ollama=True) == "library/gemma:2b"
+
+
+def test_validate_cache_repo_id_rejects_ollama_refs_without_flag():
+    with pytest.raises(HTTPException):
+        _validate_cache_repo_id("gemma:latest", is_ollama=False)
+
+
+def test_validate_cache_repo_id_accepts_hf_and_local_ids():
+    assert _validate_cache_repo_id("Qwen/Qwen3-8B") == "Qwen/Qwen3-8B"
+    assert _validate_cache_repo_id("DeepSeek-Coder-V2-Lite-Instruct-GGUF", is_local_dir=True) == "DeepSeek-Coder-V2-Lite-Instruct-GGUF"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")

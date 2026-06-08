@@ -176,7 +176,7 @@ import createResearchSynapse from './researchSynapse.js';
       // Clear any pending transitions from + → arrow swap
       submitBtn.classList.remove('anim-spin', 'anim-spin-swap', 'anim-land', 'mic-mode', 'newchat-mode', 'newchat-expanded', 'recording');
       // Ensure arrow icon is showing before launch
-      var icons = window._odysseusBtnIcons;
+      var icons = window._neataiBtnIcons;
       if (icons) submitBtn.innerHTML = icons.send;
       void submitBtn.offsetWidth;
       // Arrow launches up, then stop icon lands in
@@ -207,7 +207,7 @@ import createResearchSynapse from './researchSynapse.js';
       if (window._updateSendBtnIcon) {
         setTimeout(window._updateSendBtnIcon, 50);
       } else {
-        var icons = window._odysseusBtnIcons;
+        var icons = window._neataiBtnIcons;
         submitBtn.innerHTML = icons ? icons.send : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>';
         submitBtn.title = 'Send message';
         submitBtn.classList.remove('mic-mode', 'newchat-mode');
@@ -440,10 +440,10 @@ import createResearchSynapse from './researchSynapse.js';
           const dcRes = await fetch('/api/default-chat');
           dc = await dcRes.json();
           if (dc && dc.endpoint_url && dc.model) {
-            try { window.__odysseusDefaultChat = dc; } catch (_) {}
+            try { window.__neataiDefaultChat = dc; } catch (_) {}
           }
         } catch (_) {
-          dc = (typeof window !== 'undefined' && window.__odysseusDefaultChat) || null;
+          dc = (typeof window !== 'undefined' && window.__neataiDefaultChat) || null;
         }
         if (dc.endpoint_url && dc.model) {
           await sessionModule.createDirectChat(dc.endpoint_url, dc.model, dc.endpoint_id);
@@ -499,7 +499,7 @@ import createResearchSynapse from './researchSynapse.js';
 
     // Acquire Web Lock to hint browser not to discard this tab while streaming
     if (navigator.locks) {
-      navigator.locks.request('odysseus-stream-' + streamSessionId, { mode: 'exclusive', ifAvailable: true }, lock => {
+      navigator.locks.request('neatai-stream-' + streamSessionId, { mode: 'exclusive', ifAvailable: true }, lock => {
         if (!lock) return; // Another stream already holds a lock — fine
         return new Promise(resolve => { _webLockRelease = resolve; });
       }).catch(e => console.warn('web lock acquire failed:', e)); // Ignore lock errors — best-effort
@@ -732,19 +732,16 @@ import createResearchSynapse from './researchSynapse.js';
       const toggleState = Storage.loadToggleState();
       let isAgentMode = (toggleState.mode || 'chat') === 'agent';
       const wsMeta = sessionModule.getCurrentSessionMeta?.();
-      const isWorkspaceChat = !!(window._activeWorkspaceProjectId || wsMeta?.workspace_project_id);
-      if (isWorkspaceChat) {
-        isAgentMode = true;
+      const isWorkspaceSession = !!(wsMeta?.workspace_project_id || window._activeWorkspaceProjectId);
+      if (isWorkspaceSession) {
+        isAgentMode = false;
       }
       // Auto-escalate to agent mode when a document is open — the user expects
       // the AI to see the document and have tools to edit it
-      if (!isAgentMode && !isWorkspaceChat && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
+      if (!isAgentMode && !isWorkspaceSession && documentModule && documentModule.isPanelOpen() && documentModule.getCurrentDocId()) {
         isAgentMode = true;
       }
       fd.append('mode', isAgentMode ? 'agent' : 'chat');
-      if (isWorkspaceChat) {
-        fd.append('allow_bash', 'true');
-      }
       if (el('web-toggle').checked) {
         if (isAgentMode) {
           fd.append('allow_web_search', 'true');
@@ -752,7 +749,7 @@ import createResearchSynapse from './researchSynapse.js';
           fd.append('use_web', 'true');
         }
       }
-      if (el('research-toggle').checked && !isWorkspaceChat) {
+      if (el('research-toggle').checked && !isWorkspaceSession) {
         fd.append('use_research', 'true');
         // Research always runs in chat mode — override agent if set
         fd.set('mode', 'chat');
@@ -2738,7 +2735,7 @@ import createResearchSynapse from './researchSynapse.js';
             if (_box && sessionModule.getCurrentSessionId() === _timeoutSessionId) {
               var _timeoutMsg = document.createElement('div');
               _timeoutMsg.className = 'msg msg-ai';
-              _timeoutMsg.innerHTML = '<div class="role">Odysseus</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
+              _timeoutMsg.innerHTML = '<div class="role">NeatAi</div><div class="body" style="opacity:0.6;font-style:italic;">Research clarification timed out. Toggle research again to start over.</div>';
               _box.appendChild(_timeoutMsg);
               uiModule.scrollHistory();
             }
@@ -4482,7 +4479,7 @@ import createResearchSynapse from './researchSynapse.js';
   // streaming, history-rendered, compare-mode, all of them. Re-attaching
   // per-node listeners on every innerHTML rewrite was the source of the
   // "needs many clicks" bug.
-  if (!window.__odysseus_thread_click_bound) {
+  if (!window.__neatai_thread_click_bound) {
     document.body.addEventListener('click', (e) => {
       const header = e.target.closest('.agent-thread-header');
       if (!header) return;
@@ -4490,7 +4487,7 @@ import createResearchSynapse from './researchSynapse.js';
       if (!node) return;
       node.classList.toggle('open');
     });
-    window.__odysseus_thread_click_bound = true;
+    window.__neatai_thread_click_bound = true;
   }
 
   export default chatModule;

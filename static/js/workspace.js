@@ -6,6 +6,8 @@ import uiModule from './ui.js';
 import * as Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { providerLogo } from './providers.js';
+import Storage from './storage.js';
+import markdownModule from './markdown.js';
 
 const API_BASE = window.location.origin;
 let _open = false;
@@ -17,6 +19,10 @@ let _sessionEndpoint = null;
 let _pollTimer = null;
 let _escHandler = null;
 let _eventsWired = false;
+let _openFilePath = null;
+let _savedContent = '';
+let _editorDirty = false;
+const _collapsedDirs = new Set();
 
 async function _api(path, opts = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -39,15 +45,6 @@ function _escape(s) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-}
-
-async function _activateAgentMode(opts = {}) {
-  try {
-    const mod = await import('./sessions.js');
-    if (mod.activateAgentMode) mod.activateAgentMode(opts);
-  } catch (e) {
-    console.warn('activateAgentMode failed:', e);
-  }
 }
 
 function _updatePendingBadge(count) {
@@ -167,7 +164,7 @@ function _populateWsModelPicker(filter) {
     return;
   }
   let favs = [];
-  try { favs = JSON.parse(localStorage.getItem('odysseus-model-favorites') || '[]'); } catch { favs = []; }
+  try { favs = JSON.parse(localStorage.getItem('neatai-model-favorites') || '[]'); } catch { favs = []; }
   const favModels = all.filter(m => favs.includes(m.mid));
   const restModels = all.filter(m => !favs.includes(m.mid));
   const addSection = (label) => {
@@ -331,7 +328,9 @@ function _initWsModelPicker() {
 }
 
 async function _selectProject(projectId) {
+  if (_activeProjectId !== projectId && !(await _confirmDiscardEdits())) return;
   _activeProjectId = projectId;
+  _clearEditor();
   _loadProjects().catch(() => {});
   const proj = _projects.find(p => p.id === projectId);
   const title = _el('ws-project-title');
@@ -346,7 +345,7 @@ async function _selectProject(projectId) {
     console.warn('ensure-session:', e);
   }
   await _refreshWsModelLabel();
-  await Promise.all([_loadTree(), _loadChanges(), _loadActivity()]);
+  await _loadTree();
 }
 
 async function _loadTree() {
@@ -356,36 +355,186 @@ async function _loadTree() {
   try {
     const data = await _api(`/api/workspace/projects/${_activeProjectId}/tree`);
     treeEl.innerHTML = _renderTree(data.tree || [], '');
+    if (_openFilePath) {
+      treeEl.querySelectorAll('.ws-tree-file').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.path === _openFilePath);
+      });
+    }
   } catch (e) {
     treeEl.innerHTML = `<div class="ws-error">${_escape(e.message)}</div>`;
   }
 }
 
+function _stripThinkingForDisplay(text) {
+  return String(text || '')
+    .replace(/<think>[\s\S]*?<\/redacted_thinking>/gi, '')
+    .replace(/<think[^>]*>[\s\S]*?<\/think>/gi, '')
+    .trim();
+}
+
 function _renderTree(nodes, indent) {
-  if (!nodes || !nodes.length) return indent ? '' : '<div class="ws-muted">Empty project</div>';
+  if (!nodes || !nodes.length) return indent ? '' : '<div class="ws-muted">Empty project — click + File to start.</div>';
   return nodes.map(n => {
     if (n.type === 'dir') {
-      return `<div class="ws-tree-dir" style="padding-left:${indent}px">
-        <span class="ws-tree-label">📁 ${_escape(n.name)}</span>
-        ${_renderTree(n.children || [], indent + 12)}
+      const dirPath = n.path || n.name;
+      const children = n.children || [];
+      const collapsed = _collapsedDirs.has(dirPath);
+      const childHtml = collapsed ? '' : _renderTree(children, indent + 14);
+      const count = children.length;
+      const countLabel = count ? ` (${count})` : ' (empty)';
+      const chev = collapsed ? '>' : 'v';
+      return `<div class="ws-tree-dir" data-dir="${_escape(dirPath)}">
+        <button type="button" class="ws-tree-folder${collapsed ? ' collapsed' : ''}" data-dir="${_escape(dirPath)}" style="padding-left:${indent}px">
+          <span class="ws-tree-chevron">${chev}</span> 📁 ${_escape(n.name)}<span class="ws-tree-count">${countLabel}</span>
+        </button>
+        <div class="ws-tree-children${collapsed ? ' hidden' : ''}">${childHtml || (count ? '' : '<div class="ws-tree-empty" style="padding-left:' + (indent + 18) + 'px">(empty folder)</div>')}</div>
       </div>`;
     }
-    return `<button type="button" class="ws-tree-file" data-path="${_escape(n.path)}" style="padding-left:${indent + 4}px">
+    const active = n.path === _openFilePath ? ' active' : '';
+    return `<button type="button" class="ws-tree-file${active}" data-path="${_escape(n.path)}" style="padding-left:${indent + 14}px">
       📄 ${_escape(n.name)}
     </button>`;
   }).join('');
 }
 
-async function _previewFile(path) {
-  const pre = _el('ws-file-preview');
-  if (!pre || !_activeProjectId) return;
-  pre.textContent = 'Loading…';
+function _updateEditorChrome() {
+  const pathEl = _el('ws-editor-path');
+  const dirtyEl = _el('ws-editor-dirty');
+  const saveBtn = _el('ws-save-file');
+  const delBtn = _el('ws-delete-file');
+  const editor = _el('ws-file-editor');
+  if (pathEl) {
+    pathEl.textContent = _openFilePath || 'No file open';
+    pathEl.title = _openFilePath || '';
+  }
+  if (dirtyEl) dirtyEl.classList.toggle('hidden', !_editorDirty);
+  if (saveBtn) saveBtn.disabled = !_openFilePath || !_editorDirty;
+  if (delBtn) delBtn.disabled = !_openFilePath;
+  if (editor) editor.disabled = !_activeProjectId;
+}
+
+function _setEditorDirty(dirty) {
+  _editorDirty = !!dirty;
+  _updateEditorChrome();
+}
+
+async function _confirmDiscardEdits() {
+  if (!_editorDirty) return true;
+  return window.confirm('Discard unsaved changes?');
+}
+
+async function _openFile(path) {
+  if (!path || !_activeProjectId) return;
+  if (_openFilePath === path && !_editorDirty) return;
+  if (!(await _confirmDiscardEdits())) return;
+  const editor = _el('ws-file-editor');
+  if (editor) editor.value = 'Loading…';
+  _openFilePath = path;
+  _setEditorDirty(false);
+  _updateEditorChrome();
+  document.querySelectorAll('.ws-tree-file').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.path === path);
+  });
   try {
     const data = await _api(`/api/workspace/projects/${_activeProjectId}/file?path=${encodeURIComponent(path)}`);
-    pre.textContent = data.content || '(empty)';
+    _savedContent = data.content ?? '';
+    if (editor) editor.value = _savedContent;
   } catch (e) {
-    pre.textContent = `Error: ${e.message}`;
+    _savedContent = '';
+    if (editor) editor.value = '';
+    uiModule?.showToast?.(e.message, 'error');
   }
+  _updateEditorChrome();
+}
+
+async function _saveFile() {
+  if (!_activeProjectId || !_openFilePath) return;
+  const editor = _el('ws-file-editor');
+  const content = editor ? editor.value : '';
+  try {
+    await _api(`/api/workspace/projects/${_activeProjectId}/file`, {
+      method: 'PUT',
+      body: JSON.stringify({ path: _openFilePath, content }),
+    });
+    _savedContent = content;
+    _setEditorDirty(false);
+    uiModule?.showToast?.(`Saved ${_openFilePath}`, 'info');
+    await _loadTree();
+    await _loadActivity();
+  } catch (e) {
+    uiModule?.showToast?.(e.message, 'error');
+  }
+}
+
+async function _newFile() {
+  if (!_activeProjectId) {
+    uiModule?.showToast?.('Select a project first', 'warn');
+    return;
+  }
+  const path = window.prompt('New file path (e.g. app.py or src/main.js):');
+  if (!path || !path.trim()) return;
+  const rel = path.trim().replace(/\\/g, '/');
+  if (!(await _confirmDiscardEdits())) return;
+  _openFilePath = rel;
+  _savedContent = '';
+  const editor = _el('ws-file-editor');
+  if (editor) {
+    editor.value = '';
+    editor.focus();
+  }
+  _setEditorDirty(true);
+  _updateEditorChrome();
+  document.querySelectorAll('.ws-tree-file').forEach(btn => btn.classList.remove('active'));
+}
+
+async function _newFolder() {
+  if (!_activeProjectId) {
+    uiModule?.showToast?.('Select a project first', 'warn');
+    return;
+  }
+  const path = window.prompt('New folder path (e.g. src or components):');
+  if (!path || !path.trim()) return;
+  try {
+    await _api(`/api/workspace/projects/${_activeProjectId}/folder`, {
+      method: 'POST',
+      body: JSON.stringify({ path: path.trim().replace(/\\/g, '/') }),
+    });
+    uiModule?.showToast?.('Folder created', 'info');
+    await _loadTree();
+    await _loadActivity();
+  } catch (e) {
+    uiModule?.showToast?.(e.message, 'error');
+  }
+}
+
+async function _deleteOpenFile() {
+  if (!_activeProjectId || !_openFilePath) return;
+  if (!window.confirm(`Delete ${_openFilePath}?`)) return;
+  try {
+    await _api(`/api/workspace/projects/${_activeProjectId}/file?path=${encodeURIComponent(_openFilePath)}`, {
+      method: 'DELETE',
+    });
+    _openFilePath = null;
+    _savedContent = '';
+    _setEditorDirty(false);
+    const editor = _el('ws-file-editor');
+    if (editor) editor.value = '';
+    _updateEditorChrome();
+    uiModule?.showToast?.('File deleted', 'info');
+    await _loadTree();
+    await _loadActivity();
+  } catch (e) {
+    uiModule?.showToast?.(e.message, 'error');
+  }
+}
+
+function _clearEditor() {
+  _openFilePath = null;
+  _savedContent = '';
+  _editorDirty = false;
+  const editor = _el('ws-file-editor');
+  if (editor) editor.value = '';
+  _updateEditorChrome();
 }
 
 async function _loadChanges() {
@@ -396,7 +545,7 @@ async function _loadChanges() {
     const changes = (data.changes || []).filter(c => c.status === 'pending');
     _updatePendingBadge(changes.length);
     if (!changes.length) {
-      box.innerHTML = '<div class="ws-muted">No pending changes</div>';
+      box.innerHTML = '<div class="ws-muted">No queued shell commands. Edit project files in the editor — use Shortcuts below to queue npm/docker runs for approval.</div>';
       return;
     }
     box.innerHTML = changes.map(c => {
@@ -416,10 +565,14 @@ async function _loadChanges() {
       </div>`;
     }).join('');
     box.querySelectorAll('[data-approve]').forEach(btn => {
-      btn.addEventListener('click', () => _approveChange(btn.dataset.approve));
+      btn.addEventListener('click', () => {
+        _approveChange(btn.dataset.approve, btn).catch(e => uiModule?.showToast?.(e.message, 'error'));
+      });
     });
     box.querySelectorAll('[data-reject]').forEach(btn => {
-      btn.addEventListener('click', () => _rejectChange(btn.dataset.reject));
+      btn.addEventListener('click', () => {
+        _rejectChange(btn.dataset.reject).catch(e => uiModule?.showToast?.(e.message, 'error'));
+      });
     });
   } catch (e) {
     box.innerHTML = `<div class="ws-error">${_escape(e.message)}</div>`;
@@ -452,11 +605,24 @@ async function _loadActivity() {
   }
 }
 
-async function _approveChange(id) {
-  await _api(`/api/workspace/changes/${id}/approve`, { method: 'POST' });
-  await _loadChanges();
-  await _loadTree();
-  await _loadActivity();
+async function _approveChange(id, btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.dataset.origLabel = btn.textContent;
+    btn.textContent = 'Applying…';
+  }
+  try {
+    await _api(`/api/workspace/changes/${id}/approve`, { method: 'POST' });
+    uiModule?.showToast?.('Change approved', 'info');
+    await _loadChanges();
+    await _loadTree();
+    await _loadActivity();
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.origLabel || 'Approve';
+    }
+  }
 }
 
 async function _rejectChange(id) {
@@ -468,12 +634,29 @@ async function _rejectChange(id) {
   await _loadChanges();
 }
 
-async function _approveAll() {
-  if (!_activeProjectId) return;
-  await _api(`/api/workspace/projects/${_activeProjectId}/approve-all`, { method: 'POST' });
-  await _loadChanges();
-  await _loadTree();
-  await _loadActivity();
+async function _approveAll(btn) {
+  if (!_activeProjectId) {
+    uiModule?.showToast?.('Select a project first', 'warn');
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.dataset.origLabel = btn.textContent;
+    btn.textContent = 'Applying…';
+  }
+  try {
+    const data = await _api(`/api/workspace/projects/${_activeProjectId}/approve-all`, { method: 'POST' });
+    const n = (data.applied || []).length;
+    uiModule?.showToast?.(n ? `Approved ${n} change${n === 1 ? '' : 's'}` : 'No pending changes', 'info');
+    await _loadChanges();
+    await _loadTree();
+    await _loadActivity();
+  } finally {
+    if (btn && btn.isConnected) {
+      btn.disabled = false;
+      btn.textContent = btn.dataset.origLabel || 'Approve all';
+    }
+  }
 }
 
 async function _proposeShortcut(command, summary) {
@@ -531,8 +714,8 @@ async function _deleteProject() {
   _sessionId = null;
   _sessionModel = null;
   _sessionEndpoint = null;
+  _clearEditor();
   _el('ws-file-tree') && (_el('ws-file-tree').innerHTML = '');
-  _el('ws-file-preview') && (_el('ws-file-preview').textContent = '');
   _el('ws-changes-list') && (_el('ws-changes-list').innerHTML = '');
   _el('ws-activity-log') && (_el('ws-activity-log').innerHTML = '');
   const chatLog = _el('ws-chat-log');
@@ -546,10 +729,28 @@ function _appendWsChat(role, text, extraClass) {
   if (log.querySelector('.ws-muted')) log.innerHTML = '';
   const row = document.createElement('div');
   row.className = `ws-chat-msg ws-chat-${role}${extraClass ? ' ' + extraClass : ''}`;
-  row.textContent = text;
+  if (role === 'assistant' && markdownModule?.processWithThinking) {
+    row.innerHTML = markdownModule.processWithThinking(
+      markdownModule.squashOutsideCode(_stripThinkingForDisplay(text))
+    );
+    row.querySelectorAll('pre code').forEach(b => window.hljs?.highlightElement(b));
+  } else {
+    row.textContent = text;
+  }
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
   return row;
+}
+
+function _setWsAssistantHtml(el, text) {
+  if (!el) return;
+  const cleaned = _stripThinkingForDisplay(text);
+  if (markdownModule?.processWithThinking) {
+    el.innerHTML = markdownModule.processWithThinking(markdownModule.squashOutsideCode(cleaned));
+    el.querySelectorAll('pre code').forEach(b => window.hljs?.highlightElement(b));
+  } else {
+    el.textContent = cleaned || '…';
+  }
 }
 
 async function _sendWorkspaceChatMessage(rawText) {
@@ -562,40 +763,43 @@ async function _sendWorkspaceChatMessage(rawText) {
   try {
     await _ensureSession(_activeProjectId);
   } catch (e) {
-    uiModule?.showToast?.(e.message || 'Could not bind agent session', 'error');
+    uiModule?.showToast?.(e.message || 'Could not bind chat session', 'error');
     return;
   }
   if (!_sessionId) {
-    uiModule?.showToast?.('No agent session for this project', 'warn');
+    uiModule?.showToast?.('No chat session for this project', 'warn');
     return;
-  }
-
-  const proj = _projects.find(p => p.id === _activeProjectId);
-  try {
-    const mod = await import('./sessions.js');
-    if (mod.bindWorkspaceChatContext) {
-      mod.bindWorkspaceChatContext(_activeProjectId, proj?.name);
-    } else {
-      await _activateAgentMode({ workspace: true });
-    }
-  } catch {
-    await _activateAgentMode({ workspace: true });
   }
 
   _appendWsChat('user', text);
   const input = _el('ws-chat-input');
   if (input) input.value = '';
 
-  const assistantRow = _appendWsChat('assistant', 'Working…', 'ws-chat-streaming');
+  const assistantRow = _appendWsChat('assistant', '…', 'ws-chat-streaming');
   let assistantText = '';
-  let toolCount = 0;
   let streamError = '';
 
   const fd = new FormData();
   fd.append('message', text);
   fd.append('session', _sessionId);
-  fd.append('mode', 'agent');
-  fd.append('allow_bash', 'true');
+  fd.append('mode', 'chat');
+
+  const toggleState = Storage.loadToggleState();
+  if (document.getElementById('web-toggle')?.checked) {
+    fd.append('use_web', 'true');
+  }
+  const ragChk = document.getElementById('rag-toggle');
+  if (ragChk && !ragChk.checked) {
+    fd.append('use_rag', 'false');
+  }
+  if (document.getElementById('incognito-toggle')?.checked) {
+    fd.append('incognito', 'true');
+  }
+  try {
+    const presetsModule = await import('./presets.js');
+    const presetId = presetsModule.getSelectedPreset?.();
+    if (presetId) fd.append('preset_id', presetId);
+  } catch { /* presets optional */ }
 
   let res;
   try {
@@ -617,57 +821,33 @@ async function _sendWorkspaceChatMessage(rawText) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let nextIsError = false;
 
   const _applyAssistant = () => {
     if (!assistantRow) return;
-    let text = assistantText.trim();
+    let out = assistantText;
     if (streamError) {
-      text = streamError;
-    } else if (!text && toolCount > 0) {
-      text = `Used ${toolCount} tool(s). Check Pending changes on the right — approve files/commands to apply them.`;
-    } else if (!text) {
-      text = 'No file changes proposed. The model may need another try — use Agent mode with a tool-capable model, or ask again more specifically (e.g. "create index.html with…").';
+      assistantRow.textContent = streamError;
+    } else if (!out.trim()) {
+      assistantRow.textContent = 'No response from the model. Check that your endpoint is running.';
+    } else {
+      _setWsAssistantHtml(assistantRow, out);
     }
-    assistantRow.textContent = text;
     assistantRow.classList.remove('ws-chat-streaming');
   };
 
-  const _handleWsEvent = (json) => {
-    if (json.delta) {
-      assistantText += json.delta;
+  const _handleJson = (json) => {
+    if (json == null || typeof json !== 'object') return;
+    if (json.delta !== undefined && json.delta !== null) {
+      assistantText += String(json.delta);
       if (assistantRow) {
-        assistantRow.textContent = assistantText;
+        _setWsAssistantHtml(assistantRow, assistantText);
         assistantRow.classList.add('ws-chat-streaming');
       }
       return;
     }
-    const t = json.type;
-    if (t === 'tool_start') {
-      toolCount += 1;
-      const tool = json.tool || 'tool';
-      const cmd = json.command ? `: ${String(json.command).slice(0, 80)}` : '';
-      _appendWsChat('tool', `${tool}${cmd}`);
-      if (assistantRow && !assistantText.trim()) {
-        assistantRow.textContent = `Running ${tool}…`;
-      }
-    } else if (t === 'tool_output') {
-      const ok = json.exit_code === 0 || json.exit_code === undefined;
-      const out = (json.output || '').slice(0, 240);
-      _appendWsChat('tool', `${json.tool || 'tool'} ${ok ? 'done' : 'failed'}${out ? ': ' + out : ''}`);
-      if (['write_file', 'propose_file_change', 'bash', 'python', 'propose_command'].includes(json.tool)) {
-        _loadChanges().catch(() => {});
-        _loadTree().catch(() => {});
-        _loadActivity().catch(() => {});
-      }
-    } else if (t === 'agent_step') {
-      if (assistantRow && !assistantText.trim()) {
-        assistantRow.textContent = json.round ? `Agent step ${json.round}…` : 'Working…';
-      }
-    } else if (t === 'budget_exceeded') {
-      streamError = `Tool limit reached (${json.used || '?'} calls). Approve pending changes or start a new message.`;
-    } else if (json.error) {
-      streamError = String(json.error).slice(0, 300);
-    }
+    const err = json.error || json.text || (json.status >= 400 ? json.raw || `Error ${json.status}` : '');
+    if (err) streamError = String(err).slice(0, 400);
   };
 
   try {
@@ -675,21 +855,30 @@ async function _sendWorkspaceChatMessage(rawText) {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
-      for (const part of parts) {
-        const line = part.split('\n').find(l => l.startsWith('data: '));
-        if (!line || line === 'data: [DONE]') continue;
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (line.startsWith('event: ')) {
+          if (line.slice(7).trim() === 'error') nextIsError = true;
+          continue;
+        }
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') continue;
         let json;
-        try { json = JSON.parse(line.slice(6)); } catch { continue; }
-        _handleWsEvent(json);
+        try { json = JSON.parse(payload); } catch { continue; }
+        if (nextIsError) {
+          nextIsError = false;
+          _handleJson(json);
+          continue;
+        }
+        _handleJson(json);
       }
     }
   } catch (e) {
     streamError = streamError || e.message;
   } finally {
     _applyAssistant();
-    await Promise.all([_loadChanges(), _loadTree(), _loadActivity()]);
   }
 }
 
@@ -714,8 +903,6 @@ async function _openInChat() {
     const mod = await import('./sessions.js');
     if (mod.bindWorkspaceChatContext) {
       mod.bindWorkspaceChatContext(_activeProjectId, proj?.name);
-    } else {
-      await _activateAgentMode({ workspace: true });
     }
     // Select workspace session FIRST — loadSessions can auto-switch to another chat
     if (mod.selectSession) {
@@ -742,11 +929,11 @@ async function _openInChat() {
     const projName = proj?.name;
     const msgInput = _el('message');
     if (msgInput) {
-      msgInput.placeholder = `Agent workspace — tell me what to build in "${projName || 'this project'}"…`;
+      msgInput.placeholder = `Chat — "${projName || 'this project'}"…`;
       msgInput.focus();
     }
     uiModule?.showToast?.(
-      `Agent mode active for "${projName || 'project'}". Ask me to build something — I'll create files for you to approve.`,
+      `Opened chat for "${projName || 'project'}". Edit files in the Workspace panel.`,
       'info'
     );
   } catch (e) {
@@ -760,7 +947,7 @@ function _wireEvents() {
 
   _el('ws-new-project')?.addEventListener('click', () => _createProject().catch(e => uiModule?.showToast?.(e.message, 'error')));
   _el('ws-delete-project')?.addEventListener('click', () => _deleteProject().catch(e => uiModule?.showToast?.(e.message, 'error')));
-  _el('ws-approve-all')?.addEventListener('click', () => _approveAll().catch(e => uiModule?.showToast?.(e.message, 'error')));
+  _el('ws-refresh-tree')?.addEventListener('click', () => _loadTree().catch(e => uiModule?.showToast?.(e.message, 'error')));
   _el('ws-open-chat')?.addEventListener('click', () => _openInChat());
   _el('ws-chat-send')?.addEventListener('click', () => {
     _sendWorkspaceChatMessage(_el('ws-chat-input')?.value).catch(e => uiModule?.showToast?.(e.message, 'error'));
@@ -776,36 +963,67 @@ function _wireEvents() {
   _el('ws-cmd-dev')?.addEventListener('click', () => _proposeShortcut('npm run dev', 'Start dev server'));
   _el('ws-browser-test')?.addEventListener('click', () => _browserTest());
   _el('close-workspace-modal')?.addEventListener('click', () => close());
+  _el('ws-new-file')?.addEventListener('click', () => _newFile().catch(e => uiModule?.showToast?.(e.message, 'error')));
+  _el('ws-new-folder')?.addEventListener('click', () => _newFolder().catch(e => uiModule?.showToast?.(e.message, 'error')));
+  _el('ws-save-file')?.addEventListener('click', () => _saveFile().catch(e => uiModule?.showToast?.(e.message, 'error')));
+  _el('ws-delete-file')?.addEventListener('click', () => _deleteOpenFile().catch(e => uiModule?.showToast?.(e.message, 'error')));
   _initWsModelPicker();
 
   _el('ws-file-tree')?.addEventListener('click', e => {
+    const folderBtn = e.target.closest('.ws-tree-folder');
+    if (folderBtn?.dataset.dir) {
+      const dir = folderBtn.dataset.dir;
+      if (_collapsedDirs.has(dir)) _collapsedDirs.delete(dir);
+      else _collapsedDirs.add(dir);
+      _loadTree().catch(() => {});
+      return;
+    }
     const btn = e.target.closest('.ws-tree-file');
-    if (btn?.dataset.path) _previewFile(btn.dataset.path);
+    if (btn?.dataset.path) _openFile(btn.dataset.path).catch(err => uiModule?.showToast?.(err.message, 'error'));
   });
 
-  if (_pollTimer) clearInterval(_pollTimer);
-  _pollTimer = setInterval(() => {
-    if (_open && _activeProjectId) {
-      _loadChanges().catch(() => {});
+  const editor = _el('ws-file-editor');
+  editor?.addEventListener('input', () => {
+    if (!_openFilePath) return;
+    _setEditorDirty(editor.value !== _savedContent);
+  });
+  editor?.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      _saveFile().catch(err => uiModule?.showToast?.(err.message, 'error'));
     }
-  }, 4000);
+  });
+  _updateEditorChrome();
 }
 
 function _injectStyles() {
-  if (document.getElementById('workspace-styles')) return;
-  const style = document.createElement('style');
-  style.id = 'workspace-styles';
+  let style = document.getElementById('workspace-styles');
+  if (!style) {
+    style = document.createElement('style');
+    style.id = 'workspace-styles';
+    document.head.appendChild(style);
+  }
   style.textContent = `
-    .workspace-body { display:grid; grid-template-columns:170px 1fr 300px; gap:8px; height:calc(100% - 4px); min-height:0; }
+    .workspace-body { display:grid; grid-template-columns:170px 1fr; gap:8px; height:calc(100% - 4px); min-height:0; }
     .ws-col { display:flex; flex-direction:column; min-height:0; overflow:hidden; border:1px solid var(--border); border-radius:6px; background:var(--panel, var(--bg)); }
     .ws-col-main { min-height:0; }
-    .ws-files-pane { flex:0 0 28%; max-height:28%; min-height:80px; }
-    .ws-preview-pane { flex:0 0 22%; max-height:22%; min-height:60px; }
-    .ws-chat-pane { flex:1; display:flex; flex-direction:column; min-height:120px; padding:0 !important; }
+    .ws-files-head, .ws-editor-head { justify-content:space-between; gap:6px; }
+    .ws-file-toolbar { display:flex; gap:4px; margin-left:auto; }
+    .ws-files-pane { flex:0 0 42%; max-height:42%; min-height:180px; }
+    .ws-editor-pane { flex:1; display:flex; flex-direction:column; min-height:140px; padding:0 !important; }
+    #ws-file-editor { flex:1; width:100%; min-height:0; border:none; resize:none; padding:8px; font-family:var(--mono, 'Fira Code', monospace); font-size:12px; line-height:1.45; background:var(--code-bg, var(--bg)); color:inherit; outline:none; }
+    #ws-file-editor:disabled { opacity:0.5; }
+    .ws-editor-path { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:var(--mono, monospace); font-size:10px; opacity:0.85; }
+    .ws-editor-dirty { font-size:9px; color:var(--accent-error, #c44); flex-shrink:0; }
+    .ws-editor-dirty.hidden { display:none; }
+    .ws-btn-save:not(:disabled) { border-color:var(--accent, #4a9); font-weight:600; }
+    .ws-chat-pane { flex:0 0 32%; max-height:32%; display:flex; flex-direction:column; min-height:100px; padding:0 !important; }
     .ws-chat-log { flex:1; overflow:auto; padding:6px; min-height:0; }
     .ws-chat-msg { font-size:11px; margin-bottom:6px; padding:6px 8px; border-radius:6px; white-space:pre-wrap; word-break:break-word; }
     .ws-chat-user { background:var(--border); opacity:0.95; }
     .ws-chat-assistant { background:rgba(255,255,255,0.04); border:1px solid var(--border); }
+    .ws-chat-assistant pre { margin:6px 0; overflow:auto; }
+    .ws-chat-assistant code { font-size:10px; }
     .ws-chat-tool { font-size:10px; opacity:0.75; font-family:var(--mono, monospace); padding:4px 6px; }
     .ws-chat-streaming { opacity:0.85; }
     .ws-chat-input-row { display:flex; gap:6px; padding:6px; border-top:1px solid var(--border); }
@@ -822,9 +1040,14 @@ function _injectStyles() {
     .ws-project-name { display:block; font-size:12px; }
     .ws-project-slug { display:block; font-size:10px; opacity:0.5; }
     .ws-tree-file { display:block; width:100%; text-align:left; border:none; background:transparent; color:inherit; cursor:pointer; font-size:11px; padding:2px 4px; border-radius:3px; }
-    .ws-tree-file:hover { background:var(--border); }
-    .ws-tree-label { font-size:11px; opacity:0.85; }
-    #ws-file-preview { font-family:var(--mono, monospace); font-size:11px; white-space:pre-wrap; margin:0; min-height:120px; max-height:40vh; overflow:auto; }
+    .ws-tree-file:hover, .ws-tree-file.active { background:var(--border); }
+    .ws-tree-file.active { font-weight:600; }
+    .ws-tree-folder { display:block; width:100%; text-align:left; border:none; background:transparent; color:inherit; cursor:pointer; font-size:11px; padding:2px 4px; border-radius:3px; opacity:0.9; }
+    .ws-tree-folder:hover { background:var(--border); }
+    .ws-tree-chevron { display:inline-block; width:12px; opacity:0.75; font-size:10px; font-family:var(--mono, monospace); }
+    .ws-tree-count { opacity:0.45; font-size:10px; margin-left:2px; }
+    .ws-tree-empty { font-size:10px; opacity:0.4; font-style:italic; padding:2px 0 4px; }
+    .ws-tree-children.hidden { display:none; }
     .ws-change-card { border:1px solid var(--border); border-radius:6px; padding:8px; margin-bottom:6px; font-size:11px; }
     .ws-change-head { font-weight:600; margin-bottom:4px; }
     .ws-change-path { opacity:0.6; font-size:10px; margin-bottom:4px; word-break:break-all; }

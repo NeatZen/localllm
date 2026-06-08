@@ -253,9 +253,10 @@ def setup_chat_routes(
         # shell disabled).
         auto_escalated = False
         if chat_mode == "chat" and isinstance(message, str) and _message_needs_tools(message):
-            chat_mode = "agent"
-            auto_escalated = True
-            logger.info("chat→agent auto-escalation: message matched tool-intent pattern")
+            if not _session_workspace_project_id(session):
+                chat_mode = "agent"
+                auto_escalated = True
+                logger.info("chat→agent auto-escalation: message matched tool-intent pattern")
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
@@ -294,19 +295,17 @@ def setup_chat_routes(
         _workspace_project_id = _session_workspace_project_id(session)
         _is_workspace_session = bool(_workspace_project_id)
         if _is_workspace_session:
-            chat_mode = "agent"
-            user_requested_agent = True
+            chat_mode = "chat"
+            user_requested_agent = False
             auto_escalated = False
-            allow_bash = "true"
             logger.info(
-                "[workspace] Agent mode forced for session %s (project %s)",
+                "[workspace] Plain chat only for session %s (project %s)",
                 session, _workspace_project_id,
             )
 
         # Built-in CPU model: agent mode is too slow (large tool payloads, single
         # inference slot). Force plain chat so users get replies in seconds.
-        # Workspace sessions are exempt — they need tools to create project files.
-        if _is_bundled_local_endpoint(sess.endpoint_url) and chat_mode == "agent" and not _is_workspace_session:
+        if _is_bundled_local_endpoint(sess.endpoint_url) and chat_mode == "agent":
             chat_mode = "chat"
             user_requested_agent = False
             auto_escalated = False
@@ -314,7 +313,6 @@ def setup_chat_routes(
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"
-        # Workspace builds need the agent tool loop, not research or plain chat
         if _is_workspace_session:
             do_research = False
         if not do_research:
@@ -371,6 +369,16 @@ def setup_chat_routes(
             # index would be useless / unwanted noise.
             agent_mode=(chat_mode == "agent"),
         )
+
+        if _is_workspace_session and chat_mode == "chat":
+            ctx.messages.insert(len(ctx.preface), {
+                "role": "system",
+                "content": (
+                    "Project workspace chat: the user creates and saves files in the editor. "
+                    "You cannot run tools, bash, python, write_file, or queue approvals. "
+                    "Reply in markdown only with explanations and code snippets they can copy."
+                ),
+            })
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
@@ -454,7 +462,7 @@ def setup_chat_routes(
                 disabled_tools.update({"manage_memory", "manage_skills"})
             if not _privs.get("can_use_research", True):
                 _research_flags["do"] = False
-            if not _privs.get("can_use_agent", True) and not _is_workspace_session:
+            if not _privs.get("can_use_agent", True):
                 _effective_mode = 'chat'
                 chat_mode = 'chat'
         # Global admin disabled tools
@@ -490,22 +498,6 @@ def setup_chat_routes(
             # In chat mode compare, disable ALL agent tools (no bash, python, file ops)
             if chat_mode == 'chat':
                 disabled_tools.update({"bash", "python", "read_file", "write_file", "web_search", "search_chats", "manage_tasks"})
-
-        # Workspace agent: filesystem tools ON, document editor OFF (files live on disk)
-        if _is_workspace_session:
-            disabled_tools.discard("bash")
-            disabled_tools.discard("python")
-            disabled_tools.discard("read_file")
-            disabled_tools.discard("write_file")
-            for _wt in (
-                "list_workspace_files", "propose_file_change",
-                "propose_command", "create_workspace_plan",
-            ):
-                disabled_tools.discard(_wt)
-            disabled_tools.update({
-                "create_document", "edit_document",
-                "update_document", "suggest_document",
-            })
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from

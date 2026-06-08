@@ -17,7 +17,7 @@ from services.bundled_llm import (  # noqa: E402
 
 
 def main() -> int:
-    print("Odysseus — bundled local AI model download")
+    print("NeatAi — bundled local AI model download")
     print(f"  Repo: {DEFAULT_MODEL_REPO}")
     print(f"  File: {DEFAULT_MODEL_FILE}")
     print(f"  Size: ~2 GB (one-time download)")

@@ -17,7 +17,7 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 # Shared tmux/download log dir (used by cookbook + shell routes).
-TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "odysseus-tmux"
+TMUX_LOG_DIR = Path(tempfile.gettempdir()) / "neatai-tmux"
 
 
 # HuggingFace repo IDs are <org>/<name>, both alphanumerics plus ._-
@@ -377,7 +377,7 @@ _WINDOWS_POWERSHELL_EXE: str | None = None
 def windows_powershell_exe() -> str:
     """Resolve PowerShell for local subprocess launches.
 
-    Odysseus is often started from an IDE or service context where PATH does
+    NeatAi is often started from an IDE or service context where PATH does
     not include System32, so bare ``powershell.exe`` raises WinError 2.
     """
     global _WINDOWS_POWERSHELL_EXE
@@ -412,7 +412,7 @@ def windows_powershell_exe() -> str:
 
 
 # Windows session dir — stored in user's temp on the remote
-WIN_SESSION_DIR = "$env:TEMP\\\\odysseus-sessions"
+WIN_SESSION_DIR = "$env:TEMP\\\\neatai-sessions"
 
 # Most new Ollama library models require a recent CLI (412 if too old).
 OLLAMA_MIN_RECOMMENDED = (0, 30, 0)
@@ -485,6 +485,155 @@ def _run_shell_command(cmd: str, timeout: int = 120) -> tuple[bytes, bytes]:
         cwd=str(Path.home()),
     )
     return r.stdout, r.stderr
+
+
+_CACHE_REPO_ID_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def _validate_cache_repo_id(
+    v: str | None,
+    *,
+    is_local_dir: bool = False,
+    is_ollama: bool = False,
+) -> str:
+    """Validate a cached-model id (HF repo, local folder name, or Ollama ref)."""
+    if is_ollama:
+        return _validate_ollama_model(v)
+    rid = (v or "").strip().rstrip(".")
+    if not rid or ".." in rid or rid.startswith(("/","\\")):
+        raise HTTPException(400, "Invalid repo_id")
+    if is_local_dir:
+        if not _CACHE_REPO_ID_RE.match(rid):
+            raise HTTPException(400, "Invalid local model id")
+        return rid
+    return _validate_repo_id(rid)
+
+
+def _resolve_cached_delete_target(
+    repo_id: str,
+    cache_path: str,
+    *,
+    is_local_dir: bool = False,
+) -> Path:
+    if cache_path and cache_path != "ollama":
+        base = Path(os.path.expanduser(cache_path)).resolve()
+    else:
+        hf_home = Path(os.environ.get("HF_HOME") or (Path.home() / ".cache/huggingface"))
+        base = (hf_home / "hub").resolve()
+    if is_local_dir:
+        target = (base / repo_id).resolve()
+    else:
+        target = (base / f"models--{repo_id.replace('/', '--')}").resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid delete path") from exc
+    return target
+
+
+def delete_cached_model_local(
+    repo_id: str,
+    cache_path: str,
+    *,
+    is_local_dir: bool = False,
+) -> dict[str, Any]:
+    """Delete a cached HF model directory or local model folder."""
+    target = _resolve_cached_delete_target(
+        repo_id, cache_path, is_local_dir=is_local_dir,
+    )
+    if not target.exists():
+        return {"ok": False, "error": f"Not found: {target}"}
+    try:
+        if target.is_dir():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    except OSError as exc:
+        logger.warning("Failed to delete cached model %s: %s", target, exc)
+        return {"ok": False, "error": str(exc)}
+    if target.exists():
+        return {"ok": False, "error": f"Could not remove {target}"}
+    return {"ok": True, "deleted": str(target)}
+
+
+def delete_ollama_model_local(repo_id: str) -> dict[str, Any]:
+    ref = _validate_ollama_model(repo_id)
+    if not shutil.which("ollama"):
+        return {"ok": False, "error": "Ollama is not installed"}
+    import subprocess as sp
+
+    try:
+        r = sp.run(
+            ["ollama", "rm", ref],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            errors="replace",
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip() or f"ollama rm failed ({r.returncode})"
+        return {"ok": False, "error": err}
+    return {"ok": True, "deleted": ref}
+
+
+def sync_chat_models_after_cache_delete(
+    repo_id: str,
+    *,
+    is_ollama: bool = False,
+) -> None:
+    """Refresh endpoint model caches so the chat picker drops deleted models."""
+    import json
+
+    from core.database import ModelEndpoint, SessionLocal
+    from routes.model_routes import _probe_endpoint, invalidate_models_cache
+    from src.endpoint_resolver import normalize_base as _normalize_base
+
+    short = repo_id.split("/")[-1] if "/" in repo_id else repo_id
+    repo_base = short.removesuffix("-GGUF").removesuffix("_GGUF")
+
+    def _matches_deleted(mid: Any) -> bool:
+        mid_str = str(mid)
+        mid_short = mid_str.replace("\\", "/").split("/")[-1]
+        if mid_str == repo_id or mid_short == short or mid_short == repo_id:
+            return True
+        if repo_base and len(repo_base) >= 8:
+            stem = mid_short.rsplit(".", 1)[0]
+            if stem.startswith(repo_base) or repo_base in stem:
+                return True
+        return False
+
+    db = SessionLocal()
+    try:
+        endpoints = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True).all()
+        for ep in endpoints:
+            base = _normalize_base(ep.base_url or "")
+            is_ollama_ep = "11434" in base or "ollama" in (ep.name or "").lower()
+
+            if is_ollama and is_ollama_ep:
+                ids = _probe_endpoint(base, ep.api_key, timeout=3)
+                ep.cached_models = json.dumps(ids) if ids else None
+                continue
+
+            if not ep.cached_models:
+                continue
+            try:
+                models = json.loads(ep.cached_models)
+            except Exception:
+                continue
+            if not isinstance(models, list):
+                continue
+            filtered = [mid for mid in models if not _matches_deleted(mid)]
+            if len(filtered) != len(models):
+                ep.cached_models = json.dumps(filtered) if filtered else None
+        db.commit()
+    except Exception as exc:
+        logger.warning("sync_chat_models_after_cache_delete failed: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+    invalidate_models_cache()
 
 
 def list_local_ollama_models() -> list[dict[str, Any]]:

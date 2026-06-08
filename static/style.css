@@ -1,5 +1,5 @@
 /* ============================================ */
-/* Odysseus UI — Consolidated Stylesheet        */
+/* NeatAi UI — Consolidated Stylesheet        */
 /* ============================================ */
 
 
@@ -542,6 +542,14 @@ body.bg-pattern-sparkles {
       align-items: center;
       flex-shrink: 0;
       min-height: 24px;
+      gap: 0.35rem;
+    }
+    .sidebar-brand-logo {
+      height: 2.5rem;
+      width: auto;
+      max-width: 100%;
+      object-fit: contain;
+      flex-shrink: 0;
     }
     .sidebar-brand-title {
       font-size: 1rem;
@@ -1779,6 +1787,16 @@ body.bg-pattern-sparkles {
       background-clip: text;
       letter-spacing:0.03em;
       margin-bottom:10px;
+    }
+    #welcome-screen .welcome-name {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+    .welcome-logo {
+      max-width: min(320px, 90vw);
+      height: auto;
+      object-fit: contain;
     }
     .welcome-boat {
       width: 1.8rem;
@@ -5131,7 +5149,7 @@ body.bg-pattern-sparkles {
     /* (legacy toolbar-toggle styles removed — now using .vis-* classes) */
 
     /* Demo highlight pulse */
-    .odysseus-highlight {
+    .neatai-highlight {
       outline: 2px solid var(--accent, var(--red)) !important;
       outline-offset: 1px;
       box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);
@@ -5259,7 +5277,7 @@ body.bg-pattern-sparkles {
     @media (prefers-reduced-motion: reduce) {
       .th-cursor, .th-modal-group, .th-zone { animation: none !important; }
     }
-    .odysseus-hl-label {
+    .neatai-hl-label {
       position: absolute;
       top: -22px;
       left: 8px;
@@ -13354,6 +13372,25 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   align-items: center;
   flex-shrink: 0;
   padding-top: 2px;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.model-hub-delete,
+.models-page-delete {
+  color: var(--color-danger, #e06c75);
+  border-color: color-mix(in srgb, var(--color-danger, #e06c75) 35%, var(--border));
+}
+.model-hub-delete:hover,
+.models-page-delete:hover {
+  border-color: var(--color-danger, #e06c75);
+  background: color-mix(in srgb, var(--color-danger, #e06c75) 10%, transparent);
+}
+.models-page-action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .model-hub-active-label {
   font-size: 11px;
@@ -13468,8 +13505,13 @@ body:has(.doc-version-panel:not(.hidden)) .hamburger-btn {
   word-break: break-all;
 }
 .models-page-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex-shrink: 0;
   padding-top: 2px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .models-page-fit {
   font-size: 9px;
@@ -20344,7 +20386,7 @@ body.gallery-selecting .gallery-dl-btn,
 
 /* Welcome name — left-to-right wipe with a touch of horizontal stretch.
    Fires on initial render via the .welcome-name rule; restarts on Nobody⇄
-   Odysseus toggle via JS reflow trick. */
+   NeatAi toggle via JS reflow trick. */
 .welcome-name {
   transform-origin: left center;
   animation: welcome-name-reveal 0.55s cubic-bezier(0.34, 1.32, 0.55, 1) both;

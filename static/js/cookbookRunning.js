@@ -427,20 +427,20 @@ function _localWinSessionCmd(task, tmuxArgs) {
   const sid = task.sessionId.replace(/'/g, "''");
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
-    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+    const ps = `$sd = Join-Path $env:TEMP 'neatai-sessions'; `
       + `$logs = @((Join-Path $sd '${sid}.log'), (Join-Path $sd '${sid}.err.log')); `
       + `Get-Content $logs -ErrorAction SilentlyContinue | Select-Object -Last ${lines}`;
     return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('has-session')) {
-    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+    const ps = `$sd = Join-Path $env:TEMP 'neatai-sessions'; `
       + `$pf = Join-Path $sd '${sid}.pid'; `
       + `$p = Get-Content $pf -ErrorAction SilentlyContinue; `
       + `if ($p) { Get-Process -Id $p -ErrorAction SilentlyContinue | Out-Null; if ($?) { exit 0 } }; exit 1`;
     return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('kill-session')) {
-    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+    const ps = `$sd = Join-Path $env:TEMP 'neatai-sessions'; `
       + `$pf = Join-Path $sd '${sid}.pid'; `
       + `$p = Get-Content $pf -ErrorAction SilentlyContinue; `
       + `if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; `
@@ -448,7 +448,7 @@ function _localWinSessionCmd(task, tmuxArgs) {
     return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('send-keys') && tmuxArgs.includes('C-c')) {
-    const ps = `$sd = Join-Path $env:TEMP 'odysseus-sessions'; `
+    const ps = `$sd = Join-Path $env:TEMP 'neatai-sessions'; `
       + `$pf = Join-Path $sd '${sid}.pid'; `
       + `$p = Get-Content $pf -ErrorAction SilentlyContinue; `
       + `if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }`;
@@ -471,7 +471,7 @@ export function _tmuxCmd(task, tmuxArgs) {
 }
 
 function _winSessionCmd(task, tmuxArgs) {
-  const sd = '$env:TEMP\\odysseus-sessions';
+  const sd = '$env:TEMP\\neatai-sessions';
   const sid = task.sessionId;
   const pf = _sshPrefix(_getPort(task));
   const host = task.remoteHost;
@@ -500,7 +500,7 @@ function _tmuxGracefulKill(task) {
     return _localWinSessionCmd(task, 'kill-session -t ' + task.sessionId);
   }
   if (_isWindows(task)) {
-    const sd = '$env:TEMP\\odysseus-sessions';
+    const sd = '$env:TEMP\\neatai-sessions';
     const sid = task.sessionId;
     const pf = _sshPrefix(_getPort(task));
     const ps = `$p = Get-Content '${sd}\\${sid}.pid' -ErrorAction SilentlyContinue; if ($p) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }; Remove-Item '${sd}\\${sid}.*' -Force -ErrorAction SilentlyContinue`;
@@ -1914,7 +1914,7 @@ export function _renderRunningTab() {
           }});
         }
         if (_isWindows(task)) {
-          const sd = '$env:TEMP\\odysseus-sessions';
+          const sd = '$env:TEMP\\neatai-sessions';
           const logCmd = `ssh ${_sshPrefix(_getPort(task))}${task.remoteHost} "powershell -Command \\"Get-Content '${sd}\\${task.sessionId}.log' -Wait\\""`;
           items.push({ label: 'Copy log cmd', action: 'copy-tmux', custom: () => {
             _copyText(logCmd);

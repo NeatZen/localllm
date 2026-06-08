@@ -329,7 +329,7 @@ async def _direct_fallback(
             from src.workspace_service import get_workspace_context
             ws_ctx = get_workspace_context(session_id)
             if ws_ctx:
-                _subproc_env["ODYSSEUS_WORKSPACE"] = str(ws_ctx.root_path)
+                _subproc_env["NEATAIEUS_WORKSPACE"] = str(ws_ctx.root_path)
         except Exception:
             ws_ctx = None
 
@@ -361,9 +361,8 @@ async def _direct_fallback(
 
         if tool == "python":
             if ws_ctx:
-                from src.workspace_service import intercept_bash
-                wrapped = f'python3 -I -c {repr(content)}'
-                _, result = intercept_bash(ws_ctx, wrapped)
+                from src.workspace_service import intercept_python
+                _, result = intercept_python(ws_ctx, content)
                 return result
             # Run user code in a subprocess so an infinite loop or crash
             # can't take the whole server down. -I = isolated mode (skip

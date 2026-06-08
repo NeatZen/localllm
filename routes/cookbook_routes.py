@@ -30,15 +30,17 @@ from routes.cookbook_helpers import (
     _validate_local_dir, _validate_ssh_port, _validate_gpus, _shell_path,
     _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
     _safe_env_prefix, windows_powershell_exe,
+    delete_cached_model_local, delete_ollama_model_local, sync_chat_models_after_cache_delete,
+    _validate_cache_repo_id,
     ModelDownloadRequest, ServeRequest,
 )
 
 _HF_TOKEN_STATUS_SNIPPET = (
     'if [ -n "$HF_TOKEN" ]; then '
-    'echo "[odysseus] HF token: applied"; '
+    'echo "[neatai] HF token: applied"; '
     'else '
-    'echo "[odysseus] HF token: NOT SET — gated/private models will be denied. '
-    'Add one in Odysseus Settings -> Cookbook -> HuggingFace Token."; '
+    'echo "[neatai] HF token: NOT SET — gated/private models will be denied. '
+    'Add one in NeatAi Settings -> Cookbook -> HuggingFace Token."; '
     'fi'
 )
 
@@ -289,7 +291,7 @@ def setup_cookbook_routes() -> APIRouter:
         return False
 
     def _local_session_dir() -> Path:
-        return Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
+        return Path(os.environ.get("TEMP", tempfile.gettempdir())) / "neatai-sessions"
 
     def _read_pid_file(path: Path) -> int | None:
         """Read a PID written by PowerShell (often UTF-16 LE) or plain ASCII."""
@@ -420,7 +422,7 @@ def setup_cookbook_routes() -> APIRouter:
             ssh_base = ["ssh"]
             if _tport and _tport != "22":
                 ssh_base.extend(["-p", str(_tport)])
-            sd = "$env:TEMP\\odysseus-sessions"
+            sd = "$env:TEMP\\neatai-sessions"
             check_cmd = ssh_base + [
                 remote,
                 "powershell",
@@ -540,7 +542,7 @@ def setup_cookbook_routes() -> APIRouter:
             pass
         if not key_path.exists():
             proc = await asyncio.create_subprocess_exec(
-                "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "odysseus-cookbook", "-f", str(key_path),
+                "ssh-keygen", "-t", "ed25519", "-N", "", "-C", "neatai-cookbook", "-f", str(key_path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -557,10 +559,10 @@ def setup_cookbook_routes() -> APIRouter:
 
     def _user_shell_path_bootstrap() -> list[str]:
         return [
-            'ODYSSEUS_USER_SHELL="${SHELL:-}"',
-            'if [ -n "$ODYSSEUS_USER_SHELL" ] && [ -x "$ODYSSEUS_USER_SHELL" ]; then',
-            '  ODYSSEUS_USER_PATH="$("$ODYSSEUS_USER_SHELL" -ic \'printf "__ODYSSEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__ODYSSEUS_PATH__//p\' | tail -n 1 || true)"',
-            '  if [ -n "$ODYSSEUS_USER_PATH" ]; then export PATH="$ODYSSEUS_USER_PATH:$PATH"; fi',
+            'NEATAIEUS_USER_SHELL="${SHELL:-}"',
+            'if [ -n "$NEATAIEUS_USER_SHELL" ] && [ -x "$NEATAIEUS_USER_SHELL" ]; then',
+            '  NEATAIEUS_USER_PATH="$("$NEATAIEUS_USER_SHELL" -ic \'printf "__NEATAIEUS_PATH__%s\\n" "$PATH"\' 2>/dev/null | sed -n \'s/^__NEATAIEUS_PATH__//p\' | tail -n 1 || true)"',
+            '  if [ -n "$NEATAIEUS_USER_PATH" ]; then export PATH="$NEATAIEUS_USER_PATH:$PATH"; fi',
             'fi',
         ]
 
@@ -683,7 +685,7 @@ def setup_cookbook_routes() -> APIRouter:
             elif is_windows and remote:
                 remote_runner = f".{session_id}_run.ps1"
                 ps_lines = [
-                    '$sessionDir = "$env:TEMP\\odysseus-sessions"',
+                    '$sessionDir = "$env:TEMP\\neatai-sessions"',
                     'New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null',
                     'if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {',
                     '  Write-Host "Ollama not found. Install from https://ollama.com/download/windows"; exit 1',
@@ -702,7 +704,7 @@ def setup_cookbook_routes() -> APIRouter:
                 _Pf = f"-P {_port} " if _port and _port != "22" else ""
                 _pf = f"-p {_port} " if _port and _port != "22" else ""
                 launch_ps = (
-                    "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                    "$sd = \\\"$env:TEMP\\neatai-sessions\\\"; "
                     f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                     f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                     f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
@@ -842,7 +844,7 @@ def setup_cookbook_routes() -> APIRouter:
             # ── Windows remote: generate .ps1 runner, use Start-Process for background ──
             remote_runner = f".{session_id}_run.ps1"
             ps_lines = []
-            ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
+            ps_lines.append('$sessionDir = "$env:TEMP\\neatai-sessions"')
             ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
@@ -883,7 +885,7 @@ def setup_cookbook_routes() -> APIRouter:
             _pf = f"-p {_port} " if _port and _port != "22" else ""
             # Start-Process creates a fully detached process that survives SSH disconnect
             launch_ps = (
-                "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                "$sd = \\\"$env:TEMP\\neatai-sessions\\\"; "
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                 f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                 f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
@@ -957,7 +959,7 @@ def setup_cookbook_routes() -> APIRouter:
             # Local Windows: detached PowerShell process (no tmux/WSL required).
             # Use scripts/hf_download.py with hf_transfer OFF — the Rust path is
             # deprecated on Windows and tends to hang at 0% with cache lock contention.
-            session_dir = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
+            session_dir = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "neatai-sessions"
             session_dir.mkdir(parents=True, exist_ok=True)
             py_exe = sys.executable
             hf_script = Path(__file__).resolve().parent.parent / "scripts" / "hf_download.py"
@@ -1255,6 +1257,8 @@ def setup_cookbook_routes() -> APIRouter:
                     entry["is_gguf"] = True
                 if m.get("gguf_file"):
                     entry["gguf_file"] = m["gguf_file"]
+                if m.get("is_ollama"):
+                    entry["is_ollama"] = True
                 models.append(entry)
         except Exception as e:
             logger.warning(f"Failed to parse cached models: {e}")
@@ -1268,6 +1272,96 @@ def setup_cookbook_routes() -> APIRouter:
                     seen.add(row["repo_id"])
 
         return {"models": models, "host": host or "local"}
+
+    class CachedModelDeleteRequest(BaseModel):
+        repo_id: str
+        path: str = ""
+        is_local_dir: bool = False
+        is_ollama: bool = False
+        host: str | None = None
+        ssh_port: str | None = None
+        platform: str | None = None
+
+    @router.post("/api/model/cached/delete")
+    async def model_cached_delete(request: Request, body: CachedModelDeleteRequest):
+        """Remove a cached model from disk (HF hub dir, custom model folder, or Ollama)."""
+        require_admin(request)
+        host = _validate_remote_host(body.host)
+        ssh_port = _validate_ssh_port(body.ssh_port)
+        if ssh_port is not None and ssh_port != "" and not _SSH_PORT_RE.fullmatch(ssh_port):
+            raise HTTPException(400, "Invalid ssh_port")
+        is_ollama = body.is_ollama or body.path == "ollama"
+        repo_id = _validate_cache_repo_id(
+            body.repo_id,
+            is_local_dir=body.is_local_dir,
+            is_ollama=is_ollama,
+        )
+
+        if is_ollama:
+            if host:
+                return {"ok": False, "error": "Remote Ollama delete is not supported yet"}
+            result = delete_ollama_model_local(repo_id)
+            if result.get("ok"):
+                sync_chat_models_after_cache_delete(repo_id, is_ollama=True)
+            return result
+
+        cache_path = (body.path or "").strip()
+
+        if not host:
+            result = await asyncio.to_thread(
+                delete_cached_model_local,
+                repo_id,
+                cache_path,
+                is_local_dir=body.is_local_dir,
+            )
+            if result.get("ok"):
+                sync_chat_models_after_cache_delete(repo_id, is_ollama=False)
+            return result
+
+        delete_py = (
+            "import json, os, shutil, sys\n"
+            "from pathlib import Path\n"
+            f"repo_id = {repo_id!r}\n"
+            f"cache_path = {cache_path!r}\n"
+            f"is_local_dir = {bool(body.is_local_dir)!r}\n"
+            "if cache_path:\n"
+            "    base = Path(os.path.expanduser(cache_path)).resolve()\n"
+            "else:\n"
+            "    hf = Path(os.environ.get('HF_HOME') or Path.home() / '.cache/huggingface')\n"
+            "    base = (hf / 'hub').resolve()\n"
+            "target = (base / repo_id).resolve() if is_local_dir else (base / ('models--' + repo_id.replace('/', '--'))).resolve()\n"
+            "try:\n"
+            "    target.relative_to(base)\n"
+            "except ValueError:\n"
+            "    print(json.dumps({'ok': False, 'error': 'invalid path'})); sys.exit(0)\n"
+            "if not target.exists():\n"
+            "    print(json.dumps({'ok': False, 'error': f'not found: {target}'})); sys.exit(0)\n"
+            "try:\n"
+            "    shutil.rmtree(target) if target.is_dir() else target.unlink()\n"
+            "except OSError as e:\n"
+            "    print(json.dumps({'ok': False, 'error': str(e)})); sys.exit(0)\n"
+            "if target.exists():\n"
+            "    print(json.dumps({'ok': False, 'error': 'delete failed'})); sys.exit(0)\n"
+            "print(json.dumps({'ok': True, 'deleted': str(target)}))\n"
+        )
+        script = TMUX_LOG_DIR / "delete_cache.py"
+        script.write_text(delete_py, encoding="utf-8")
+        _pf = f"-p {ssh_port} " if ssh_port and ssh_port != "22" else ""
+        if body.platform == "windows":
+            cmd = f'ssh {_pf}{host} "python -" < \'{script}\''
+        else:
+            cmd = f"ssh {_pf}{host} 'python3 -' < '{script}'"
+        stdout_b, stderr_b = await asyncio.to_thread(_run_shell_command, cmd, 120)
+        try:
+            result = json.loads(stdout_b.decode(errors="replace").strip() or "{}")
+            if isinstance(result, dict) and result.get("ok"):
+                sync_chat_models_after_cache_delete(repo_id, is_ollama=False)
+                return result
+            err = (result.get("error") if isinstance(result, dict) else None) or stderr_b.decode(errors="replace")[:300]
+            return {"ok": False, "error": err or "Remote delete failed"}
+        except Exception as exc:
+            logger.warning("Remote cache delete parse failed: %s stderr=%s", exc, stderr_b[:200])
+            return {"ok": False, "error": "Remote delete failed"}
 
     def _auto_register_image_endpoint(req: ServeRequest, remote: str | None) -> str | None:
         """Register a diffusion model as an image endpoint so it appears in the model selector."""
@@ -1382,7 +1476,7 @@ def setup_cookbook_routes() -> APIRouter:
             # ── Windows remote: generate .ps1 serve runner ──
             remote_runner = f".{session_id}_run.ps1"
             ps_lines = []
-            ps_lines.append('$sessionDir = "$env:TEMP\\odysseus-sessions"')
+            ps_lines.append('$sessionDir = "$env:TEMP\\neatai-sessions"')
             ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
@@ -1417,7 +1511,7 @@ def setup_cookbook_routes() -> APIRouter:
             _Pf = f"-P {_port} " if _port and _port != "22" else ""
             _pf = f"-p {_port} " if _port and _port != "22" else ""
             launch_ps = (
-                "$sd = \\\"$env:TEMP\\odysseus-sessions\\\"; "
+                "$sd = \\\"$env:TEMP\\neatai-sessions\\\"; "
                 f"Start-Process powershell -ArgumentList '-ExecutionPolicy','Bypass','-File','$HOME\\{remote_runner}' "
                 f"-RedirectStandardOutput \\\"$sd\\{session_id}.log\\\" "
                 f"-RedirectStandardError \\\"$sd\\{session_id}.err.log\\\" "
@@ -1429,7 +1523,7 @@ def setup_cookbook_routes() -> APIRouter:
             )
         elif is_windows and not remote:
             # Local Windows: detached PowerShell (no tmux/WSL required).
-            session_dir = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "odysseus-sessions"
+            session_dir = Path(os.environ.get("TEMP", tempfile.gettempdir())) / "neatai-sessions"
             session_dir.mkdir(parents=True, exist_ok=True)
             runner_ps = TMUX_LOG_DIR / f"{session_id}_run.ps1"
             ps_lines = [
@@ -1662,7 +1756,7 @@ def setup_cookbook_routes() -> APIRouter:
             # Also create the session directory for background tasks
             setup_script = (
                 'powershell -Command "'
-                "New-Item -ItemType Directory -Force -Path $env:TEMP\\odysseus-sessions | Out-Null; "
+                "New-Item -ItemType Directory -Force -Path $env:TEMP\\neatai-sessions | Out-Null; "
                 "try { python --version } catch { Write-Host 'ERROR: Python not found — install from python.org'; exit 1 }; "
                 "python -m pip install -q huggingface-hub 2>$null; "
                 "python -c \\\"from huggingface_hub import snapshot_download; print('OK')\\\""
@@ -2365,7 +2459,7 @@ def setup_cookbook_routes() -> APIRouter:
             is_alive = False
             if is_win_task and remote:
                 # Windows remote: check PID file + Get-Process, read log tail
-                sd = "$env:TEMP\\odysseus-sessions"
+                sd = "$env:TEMP\\neatai-sessions"
                 ssh_base = ["ssh"]
                 if _tport and _tport != "22":
                     ssh_base.extend(["-p", str(_tport)])

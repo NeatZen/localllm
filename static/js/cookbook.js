@@ -1428,7 +1428,7 @@ function _wireTabEvents(body) {
         const res = await fetch(`/api/cookbook/ollama-search?${params}`, { credentials: 'same-origin' });
         if (!res.ok) {
           const errText = res.status === 404
-            ? 'Search API not loaded — restart Odysseus and hard-refresh (Ctrl+Shift+R)'
+            ? 'Search API not loaded — restart NeatAi and hard-refresh (Ctrl+Shift+R)'
             : `HTTP ${res.status}`;
           ollamaList.innerHTML = `<div class="hwfit-loading">Couldn't search Ollama (${esc(errText)})</div>`;
           return;
@@ -1789,7 +1789,7 @@ function _renderRecipes() {
   html += _buildServerOpts(false);
   html += '</select>';
   html += '</div>';
-  html += '<p class="memory-desc doclib-desc">Optional packages that extend Odysseus capabilities. Install on local or remote servers.</p>';
+  html += '<p class="memory-desc doclib-desc">Optional packages that extend NeatAi capabilities. Install on local or remote servers.</p>';
   html += '<div class="doclib-grid" id="cookbook-deps-list"></div>';
   html += '</div></div>';
 
@@ -1828,7 +1828,7 @@ function _renderRecipes() {
    // the same `.cal-add-btn-text` rules, so styling stays consistent.
   html += '<button class="cal-add-btn cal-add-btn-text" id="cookbook-server-add" title="Add server" style="margin-left:auto;"><span class="cal-add-plus">+</span><span class="cal-add-label">Add</span></button>';
   html += '</div>';
-  html += '<p class="memory-desc doclib-desc">Configure SSH servers, install Odysseus keys, choose model directories, and set the default server. Local is this machine.</p>';
+  html += '<p class="memory-desc doclib-desc">Configure SSH servers, install NeatAi keys, choose model directories, and set the default server. Local is this machine.</p>';
   html += '<div class="memory-toolbar cookbook-servers-toolbar" style="margin-top:4px;">';
   html += `<div id="cookbook-servers-list">`;
   for (let i = 0; i < _es.servers.length; i++) {

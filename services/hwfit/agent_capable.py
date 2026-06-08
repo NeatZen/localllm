@@ -1,4 +1,4 @@
-"""Heuristic: can this model run Odysseus agent mode (tool calling)?"""
+"""Heuristic: can this model run NeatAi agent mode (tool calling)?"""
 
 from __future__ import annotations
 

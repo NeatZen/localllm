@@ -1,4 +1,4 @@
-# Run Odysseus on your local network so a phone/tablet on the same Wi-Fi can connect.
+# Run NeatAi on your local network so a phone/tablet on the same Wi-Fi can connect.
 # Usage:
 #   .\run-phone.ps1           # default port 7000
 #   .\run-phone.ps1 -Port 8080
@@ -73,7 +73,7 @@ $env:ALLOWED_ORIGINS = @(
 ) -join ","
 
 Write-Host ""
-Write-Host "=== Odysseus (phone / LAN access) ===" -ForegroundColor Cyan
+Write-Host "=== NeatAi (phone / LAN access) ===" -ForegroundColor Cyan
 Write-Host "On this PC:     http://127.0.0.1:$Port"
 if ($lanIp -ne "YOUR_PC_IP") {
     Write-Host "On your phone:  http://${lanIp}:$Port" -ForegroundColor Green
@@ -85,7 +85,7 @@ Write-Host ""
 Write-Host "Requirements:"
 Write-Host "  - Phone on the same Wi-Fi as this PC"
 Write-Host "  - Windows Firewall allows inbound TCP port $Port (Private network)"
-Write-Host "  - Stop Docker Odysseus if port $Port is busy: docker compose down"
+Write-Host "  - Stop Docker NeatAi if port $Port is busy: docker compose down"
 Write-Host "Note: ChromaDB warnings are normal without Docker. Built-in AI uses port 11435."
 Write-Host ""
 

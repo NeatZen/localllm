@@ -16,10 +16,10 @@ let API_BASE = '';
 let _cachedItems = []; // cached /api/models items for model-switch dropdown
 let _lastFetchTime = 0;
 const _FETCH_CACHE_TTL = 30000; // 30s client-side cache for /api/models
-const COLLAPSE_KEY = 'odysseus-models-collapsed';
-const FAVORITES_KEY = 'odysseus-model-favorites';
-const USAGE_KEY = 'odysseus-model-usage';
-const SORT_KEY = 'odysseus-model-sort';
+const COLLAPSE_KEY = 'neatai-models-collapsed';
+const FAVORITES_KEY = 'neatai-model-favorites';
+const USAGE_KEY = 'neatai-model-usage';
+const SORT_KEY = 'neatai-model-sort';
 
 export function init(apiBase) {
   API_BASE = apiBase;
@@ -175,7 +175,7 @@ export async function refreshModels(force = false) {
     box.appendChild(_loadingSpinner.createElement());
     _loadingSpinner.start();
     try {
-      const res = await fetch(`${API_BASE}/api/models`);
+      const res = await fetch(`${API_BASE}/api/models${force ? '?refresh=true' : ''}`);
       const data = await res.json();
       _lastFetchTime = Date.now();
       _cachedItems = data.items || [];

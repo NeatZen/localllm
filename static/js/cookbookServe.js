@@ -670,7 +670,7 @@ function _rerenderCachedModels() {
       }
 
       // Saved-configs dropdown. Rebuilt each open (and after delete) so it always
-      // reflects the stored presets. Standard Odysseus .dropdown look, positioned
+      // reflects the stored presets. Standard NeatAi .dropdown look, positioned
       // fixed at the toggle and right-aligned to it.
       function _showSavedConfigMenu(anchor) {
         document.querySelectorAll('.cookbook-saved-menu').forEach(d => d.remove());
@@ -1289,46 +1289,25 @@ function _resolveCacheHost() {
 async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = null) {
   if (!skipConfirm && !(await uiModule.styledConfirm(`Delete ${repo} from cache?`, { confirmText: 'Delete', danger: true }))) return;
   const m = model || _cachedAllModels.find(x => x.repo_id === repo);
-  // Delete the EXACT on-disk path the scan reported. Models in a custom
-  // model dir live at <path>/<repo>; HF-cache models at
-  // <path>/models--<org>--<name>. The old code always rm'd the hardcoded
-  // ~/.cache/huggingface/hub path, so models in a custom dir were never
-  // removed and reappeared on the next scan. m.path is already absolute
-  // (os.path.expanduser ran on the host); only the bare fallback uses ~.
-  let target;
-  if (m && m.is_local_dir && m.path) {
-    target = `${m.path}/${repo}`;
-  } else if (m && m.path) {
-    target = `${m.path}/models--${repo.replace(/\//g, '--')}`;
-  } else {
-    target = `~/.cache/huggingface/hub/models--${repo.replace(/\//g, '--')}`;
-  }
   const host = _resolveCacheHost();
-  let cmd;
-  if (_isWindows()) {
-    const winTarget = target.startsWith('~')
-      ? target.replace(/^~/, '$env:USERPROFILE').replace(/\//g, '\\')
-      : target.replace(/\//g, '\\');
-    cmd = `Remove-Item -Recurse -Force "${winTarget}" -ErrorAction SilentlyContinue`;
-    if (host) {
-      const pf = _sshPrefix(_getPort(host));
-      cmd = `ssh ${pf}${host} "powershell -Command \\"${cmd}\\""`;
-    }
-  } else {
-    // $HOME expands inside double quotes; ~ would not, so normalize the
-    // fallback. Quoting also handles spaces in custom model-dir paths.
-    const unixTarget = target.startsWith('~') ? target.replace(/^~/, '$HOME') : target;
-    cmd = `rm -rf "${unixTarget}"`;
-    if (host) cmd = _sshCmd(host, cmd, _getPort(host));
+  const payload = {
+    repo_id: repo,
+    path: m?.path || '',
+    is_local_dir: !!m?.is_local_dir,
+    is_ollama: !!(m?.is_ollama || m?.path === 'ollama' || m?.source === 'ollama'),
+  };
+  if (host) {
+    payload.host = host;
+    const port = _getPort(host);
+    if (port) payload.ssh_port = port;
+    const plat = _getPlatform(host);
+    if (plat) payload.platform = plat;
   }
-  // Deleting a large model (tens/hundreds of GB) can take a while, especially
-  // over SSH — show a whirlpool spinner on the row so it doesn't look frozen.
   let _wp = null, _prevPos = '';
   if (itemEl) {
     _wp = spinnerModule.createWhirlpool(18);
     const ov = document.createElement('div');
     ov.className = 'cookbook-delete-overlay';
-    // Just the whirlpool, centered — no "Deleting…" text.
     ov.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb, var(--panel, var(--bg)) 82%, transparent);z-index:5;border-radius:inherit;';
     ov.appendChild(_wp.element);
     _prevPos = itemEl.style.position;
@@ -1337,12 +1316,17 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
     itemEl.appendChild(ov);
   }
   try {
-    const res = await fetch('/api/shell/exec', {
-      method: 'POST', credentials: 'same-origin',
+    const res = await fetch('/api/model/cached/delete', {
+      method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: cmd }),
+      body: JSON.stringify(payload),
     });
-    if (!res.ok) { uiModule.showError(`Delete failed (${res.status})`); return; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      uiModule.showError(data.error || data.detail || `Delete failed (${res.status})`);
+      return;
+    }
     if (itemEl) {
       itemEl.querySelector('.cookbook-delete-overlay')?.remove();
       itemEl.style.transition = 'opacity 0.24s ease, transform 0.24s ease, max-height 0.28s ease, padding 0.28s ease, margin 0.28s ease';
@@ -1358,13 +1342,12 @@ async function _deleteCachedModel(repo, itemEl, skipConfirm = false, model = nul
       await new Promise(resolve => setTimeout(resolve, 300));
       if (itemEl.parentElement) itemEl.remove();
     }
-    // Drop from the in-memory list so a re-render/filter doesn't resurrect it.
     _cachedAllModels = _cachedAllModels.filter(x => x.repo_id !== repo);
+    if (window.modelsModule?.refreshModels) await window.modelsModule.refreshModels(true);
+    uiModule.showToast?.(`Deleted ${repo}`, 'info');
   } catch (e) {
     uiModule.showError('Delete failed: ' + (e && e.message ? e.message : e));
   } finally {
-    // Tear down the spinner. On success the row is already gone; on error the
-    // row survives, so restore it (remove overlay, re-enable interaction).
     if (_wp) { try { _wp.destroy(); } catch {} }
     if (itemEl && itemEl.isConnected) {
       itemEl.querySelector('.cookbook-delete-overlay')?.remove();
@@ -1532,7 +1515,7 @@ export async function _fetchCachedModels() {
 
     if (!allModels.length) {
       if (!host) {
-        list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached models found</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Docker Local uses Odysseus’s cache in <code>data/huggingface</code>. Download a model here, or copy an existing host HuggingFace cache into that folder once.</div></div>';
+        list.innerHTML = '<div class="hwfit-loading" style="flex-direction:column;gap:6px;text-align:center;"><div>No cached models found</div><div style="font-size:11px;opacity:0.55;max-width:420px;line-height:1.4;">Docker Local uses NeatAi’s cache in <code>data/huggingface</code>. Download a model here, or copy an existing host HuggingFace cache into that folder once.</div></div>';
       } else {
         list.innerHTML = '<div class="hwfit-loading">No cached models found</div>';
       }

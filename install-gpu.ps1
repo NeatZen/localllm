@@ -1,4 +1,4 @@
-# Enable NVIDIA GPU for Odysseus built-in AI (RTX / CUDA).
+# Enable NVIDIA GPU for NeatAi built-in AI (RTX / CUDA).
 
 # Run once from PowerShell:  .\install-gpu.ps1
 
@@ -288,7 +288,7 @@ function Patch-LlamaWinmode {
 
 Write-Host ""
 
-Write-Host "=== Odysseus GPU Setup (NVIDIA CUDA) ===" -ForegroundColor Cyan
+Write-Host "=== NeatAi GPU Setup (NVIDIA CUDA) ===" -ForegroundColor Cyan
 
 Write-Host ""
 
@@ -456,7 +456,7 @@ if (-not (Test-Path $modelPath)) {
 
         Write-Host ""
 
-        Write-Host "GPU verification failed. See data\logs\bundled-llm.log after starting Odysseus." -ForegroundColor Red
+        Write-Host "GPU verification failed. See data\logs\bundled-llm.log after starting NeatAi." -ForegroundColor Red
 
         Restore-CpuVenv "GPU verification failed" | Out-Null
 
@@ -480,7 +480,7 @@ Write-Host ""
 
 Write-Host "=== GPU setup complete ===" -ForegroundColor Green
 
-Write-Host "Restart Odysseus (Start Odysseus.bat). Built-in AI will use your RTX GPU."
+Write-Host "Restart NeatAi (Start NeatAi.bat). Built-in AI will use your RTX GPU."
 
 Write-Host "Optional: set BUNDLED_LLM_N_GPU_LAYERS=-1 in .env (default: all layers on GPU)."
 

@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import Request, HTTPException
 
 # Must match routes.auth_routes.SESSION_COOKIE
-_SESSION_COOKIE = "odysseus_session"
+_SESSION_COOKIE = "neatai_session"
 
 
 def _user_from_session_cookie(request: Request) -> Optional[str]:
