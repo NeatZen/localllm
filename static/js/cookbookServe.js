@@ -18,6 +18,7 @@ let _getPlatform;
 let _isWindows;
 let _buildEnvPrefix;
 let _buildServeCmd;
+let _resolveGgufPathForServe;
 let _shellQuote;
 let _psQuote;
 let _detectBackend;
@@ -381,8 +382,12 @@ function _rerenderCachedModels() {
       // Row 1: Backend + Server + Env
       panelHtml += `<div class="hwfit-serve-row">`;
       const _backendChoices = _isWindows()
-        ? [['llamacpp','llama.cpp']]
-        : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['diffusers','Diffusers']];
+        ? (detectedBackend === 'ollama'
+          ? [['ollama', 'Ollama']]
+          : detectedBackend === 'diffusers'
+            ? [['diffusers', 'Diffusers']]
+            : [['llamacpp', 'llama.cpp']])
+        : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['diffusers','Diffusers'],['ollama','Ollama']];
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
       panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
@@ -512,24 +517,18 @@ function _rerenderCachedModels() {
           const _srv = _envState.servers.find(s => s.host === _cacheSrv.value) || _envState.servers[parseInt(_cacheSrv.value)];
           _serveHost = _srv?.host || '';
         }
+        panel._serveBlocked = '';
         if (backend === 'llamacpp') {
-          if (m.gguf_file && _isWindows() && !_serveHost) {
-            // Windows local: use resolved path from cache scan (bash find/$() is blocked).
-            f._gguf_path = m.gguf_file.replace(/\\/g, '/');
-          } else {
-          // For multi-part GGUFs, llama.cpp requires the first split
-          // (-00001-of-NNNNN.gguf). Prefer it (sorted, so UD-IQ4_XS/001 comes
-          // before Q4_K_M/001 etc); fall back to any single GGUF sorted.
-          // Use $HOME (not ~) so tilde survives variable interpolation inside $(...).
-          const dir = `"$HOME/.cache/huggingface/hub/models--${repo.replace(/\//g, '--')}/snapshots"`;
-          // GGUF needs the actual .gguf FILE, not the folder. For a custom-dir
-          // model the file lives under "<path>/<repo>" — search there just like we
-          // search the HF snapshots dir, so serving a GGUF from a custom dir works
-          // instead of handing llama.cpp a directory (which fails).
-          const _ldir = `"${m.path}/${repo}"`;
-          f._gguf_path = m.is_local_dir && m.path
-            ? `$({ find ${_ldir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${_ldir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`
-            : `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
+          const resolved = _resolveGgufPathForServe(m, repo, _serveHost);
+          if (resolved) {
+            f._gguf_path = resolved;
+          } else if (_isWindows() && !_serveHost) {
+            if (m.is_gguf) {
+              panel._serveBlocked = 'No .gguf file found for this model. Refresh the cache list or re-download the GGUF quant.';
+            } else {
+              panel._serveBlocked = 'This model is not GGUF — llama.cpp cannot load safetensors on Windows. Download a GGUF quant, use Ollama, or serve on Linux/WSL with vLLM.';
+            }
+            f._gguf_path = 'MISSING.gguf';
           }
         }
         if (f.reasoning_parser) {
@@ -538,6 +537,13 @@ function _rerenderCachedModels() {
         }
         let cmd = _buildServeCmd(f, serveModel, backend);
         if (f.extra && f.extra.trim()) cmd += ' ' + f.extra.trim();
+        const _launchBtn = panel.querySelector('.hwfit-serve-launch');
+        if (panel._serveBlocked) {
+          cmd = `# ${panel._serveBlocked}`;
+          if (_launchBtn) _launchBtn.disabled = true;
+        } else if (_launchBtn) {
+          _launchBtn.disabled = false;
+        }
         const _ce2 = panel.querySelector('.hwfit-serve-cmd'); _ce2.value = cmd; _ce2.style.height = 'auto'; _ce2.style.height = _ce2.scrollHeight + 'px';
         panel._cmd = cmd;
         panel._host = f.host || '';
@@ -1196,6 +1202,10 @@ function _rerenderCachedModels() {
       panel.querySelector('.hwfit-serve-launch').addEventListener('click', async (ev) => {
         const _launchBtn = ev.currentTarget;
         if (!_cmdManuallyEdited) updateCmd();
+        if (panel._serveBlocked) {
+          uiModule.showToast(panel._serveBlocked, 8000);
+          return;
+        }
         const launchCmd = _cmdTextarea ? _cmdTextarea.value.trim() : panel._cmd;
         const serveState = {};
         panel.querySelectorAll('.hwfit-sf').forEach(el => {
@@ -1598,6 +1608,7 @@ export function initServe(shared) {
   _isWindows = shared._isWindows;
   _buildEnvPrefix = shared._buildEnvPrefix;
   _buildServeCmd = shared._buildServeCmd;
+  _resolveGgufPathForServe = shared._resolveGgufPathForServe;
   _shellQuote = shared._shellQuote;
   _psQuote = shared._psQuote;
   _detectBackend = shared._detectBackend;

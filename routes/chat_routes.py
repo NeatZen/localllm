@@ -101,6 +101,11 @@ def _is_bundled_local_endpoint(endpoint_url: str) -> bool:
     return ":11435/" in url or ":11435/v1" in url
 
 
+def _session_supports_agent_tools(sess) -> bool:
+    from src.endpoint_resolver import endpoint_supports_native_tools
+    return endpoint_supports_native_tools(getattr(sess, "endpoint_url", ""), getattr(sess, "model", ""))
+
+
 def setup_chat_routes(
     session_manager,
     chat_handler,
@@ -254,9 +259,15 @@ def setup_chat_routes(
         auto_escalated = False
         if chat_mode == "chat" and isinstance(message, str) and _message_needs_tools(message):
             if not _session_workspace_project_id(session):
-                chat_mode = "agent"
-                auto_escalated = True
-                logger.info("chat→agent auto-escalation: message matched tool-intent pattern")
+                if _session_supports_agent_tools(sess):
+                    chat_mode = "agent"
+                    auto_escalated = True
+                    logger.info("chat→agent auto-escalation: message matched tool-intent pattern")
+                else:
+                    logger.info(
+                        "chat stays chat: tool-intent matched but %s does not support native tools",
+                        sess.model,
+                    )
         active_doc_id = form_data.get("active_doc_id", "").strip()
         logger.info(f"[doc-inject] chat_mode={chat_mode}, active_doc_id={active_doc_id!r}")
 
@@ -310,6 +321,16 @@ def setup_chat_routes(
             user_requested_agent = False
             auto_escalated = False
             logger.info("chat→chat forced for built-in local CPU model")
+
+        if chat_mode == "agent" and not _session_supports_agent_tools(sess):
+            chat_mode = "chat"
+            user_requested_agent = False
+            auto_escalated = False
+            logger.info(
+                "agent→chat forced: %s on %s does not support native tools",
+                sess.model,
+                sess.endpoint_url,
+            )
 
         # Check for research_pending BEFORE mode persist overwrites it
         do_research = str(use_research).lower() == "true"

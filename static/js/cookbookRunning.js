@@ -11,10 +11,15 @@ import { _diagnose, _showDiagnosis, _clearDiagnosis } from './cookbook-diagnosis
 // the word "error" in the sidebar — a server the user stopped or one that
 // quit cleanly reads as "stopped", not "error".
 function _statusLabel(status, type) {
+  if (status === 'queued') return 'waiting…';
   if (status === 'running' && type === 'download') return 'downloading';
   if (status === 'done' && type === 'download') return 'finished';
   if (status === 'error') return 'stopped';
   return status || '';
+}
+
+function _isQueueSessionId(id) {
+  return typeof id === 'string' && id.startsWith('queue-');
 }
 
 // Single source of truth for what a task's status badge shows + its style class.
@@ -66,6 +71,7 @@ const SERVE_STATE_KEY = 'cookbook-serve-state';
 const TASK_POLL_INTERVAL_MS = 3000;       // delay between reconnect-loop iterations
 const BG_MONITOR_INTERVAL_MS = 10000;     // background task status poll
 const STALE_PROGRESS_MS = 5 * 60 * 1000;  // download with no progress this long = stale
+const STALE_PROGRESS_MS_OLLAMA = 30 * 60 * 1000;  // large Ollama layers can pause between log lines
 
 // ── Phase detection (mirrors Python _parse_serve_phase in cookbook_routes.py) ──
 // Single source of truth for serve task status. KEEP IN SYNC with the Python version.
@@ -204,13 +210,16 @@ function _refreshModelsAfterEndpointChange() {
 
 function _processQueue() {
   const tasks = _loadTasks();
-  const running = tasks.filter(t => t.type === 'download' && t.status === 'running');
+  const running = tasks.filter(
+    t => t.type === 'download' && t.status === 'running' && !_isQueueSessionId(t.sessionId),
+  );
   const queued = tasks.filter(t => t.type === 'download' && t.status === 'queued');
   if (!queued.length) return;
 
   const busyHosts = new Set(running.map(t => t.remoteHost || 'local'));
 
   for (const task of queued) {
+    if (task._startLaunched) continue;
     const host = task.remoteHost || 'local';
     if (busyHosts.has(host)) continue;
     busyHosts.add(host);
@@ -224,16 +233,15 @@ async function _startQueuedDownload(task) {
     _renderRunningTab();
     return;
   }
-  // Flip to 'running' SYNCHRONOUSLY (before the async POST) so a concurrent
-  // _processQueue — or a second "Start now" — can't see it as still 'queued' and
-  // launch the same download a second time. Without this, finishing another
-  // download mid-POST re-queued this one into a duplicate task.
+  // Mark launch in-flight before the async POST so a concurrent _processQueue
+  // (or a second "Start now") can't start the same download twice. Keep status
+  // 'queued' until the server returns a real cookbook-* session id — polling
+  // a queue-* id has no PID/log and was incorrectly marked crashed.
   {
     const _pre = _loadTasks();
     const _pt = _pre.find(t => t.sessionId === task.sessionId);
     if (_pt) {
-      if (_pt.status === 'running' && _pt._startLaunched) return;  // already being started
-      _pt.status = 'running';
+      if (_pt._startLaunched) return;
       _pt._startLaunched = true;
       _saveTasks(_pre);
     }
@@ -246,13 +254,13 @@ async function _startQueuedDownload(task) {
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      _updateTask(task.sessionId, { status: 'error', output: `HTTP ${res.status}: ${errText.slice(0, 200)}` });
+      _updateTask(task.sessionId, { status: 'error', _startLaunched: false, output: `HTTP ${res.status}: ${errText.slice(0, 200)}` });
       _renderRunningTab();
       return;
     }
     const data = await res.json();
     if (!data.ok) {
-      _updateTask(task.sessionId, { status: 'error', output: data.error || 'Unknown error' });
+      _updateTask(task.sessionId, { status: 'error', _startLaunched: false, output: data.error || 'Unknown error' });
       _renderRunningTab();
       return;
     }
@@ -263,13 +271,14 @@ async function _startQueuedDownload(task) {
       t.sessionId = data.session_id;
       t.id = data.session_id;
       t.status = 'running';
+      t._startLaunched = false;
       _saveTasks(tasks);
     }
     _startBackgroundMonitor();
     await new Promise(r => setTimeout(r, 2000));
     _renderRunningTab();
   } catch (e) {
-    _updateTask(task.sessionId, { status: 'error', output: e.message || 'Network error' });
+    _updateTask(task.sessionId, { status: 'error', _startLaunched: false, output: e.message || 'Network error' });
     _renderRunningTab();
   }
 }
@@ -427,9 +436,13 @@ function _localWinSessionCmd(task, tmuxArgs) {
   const sid = task.sessionId.replace(/'/g, "''");
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
+    // -Tail per file — piping full multi-MB Ollama logs through Select-Object
+    // timed out shell/exec and falsely marked healthy downloads as crashed.
     const ps = `$sd = Join-Path $env:TEMP 'neatai-sessions'; `
-      + `$logs = @((Join-Path $sd '${sid}.log'), (Join-Path $sd '${sid}.err.log')); `
-      + `Get-Content $logs -ErrorAction SilentlyContinue | Select-Object -Last ${lines}`;
+      + `$out = @(); `
+      + `foreach ($name in @('${sid}.log','${sid}.err.log')) { `
+      + `$p = Join-Path $sd $name; if (Test-Path $p) { $out += Get-Content -Path $p -Tail ${lines} -ErrorAction SilentlyContinue } }; `
+      + `$out -join [Environment]::NewLine`;
     return `"${_WIN_PS_EXE}" -NoProfile -ExecutionPolicy Bypass -Command "${ps.replace(/"/g, '\\"')}"`;
   }
   if (tmuxArgs.includes('has-session')) {
@@ -477,7 +490,7 @@ function _winSessionCmd(task, tmuxArgs) {
   const host = task.remoteHost;
   if (tmuxArgs.includes('capture-pane')) {
     const lines = tmuxArgs.match(/-S\s*-?(\d+)/)?.[1] || '200';
-    const ps = `Get-Content '${sd}\\${sid}.log' -Tail ${lines} -ErrorAction SilentlyContinue`;
+    const ps = `$out = @(); foreach ($name in @('${sid}.log','${sid}.err.log')) { $p = Join-Path '${sd}' $name; if (Test-Path $p) { $out += Get-Content -Path $p -Tail ${lines} -ErrorAction SilentlyContinue } }; $out -join [Environment]::NewLine`;
     return `ssh ${pf}${host} "powershell -Command \\"${ps}\\""`;
   }
   if (tmuxArgs.includes('has-session')) {
@@ -735,12 +748,49 @@ function _downloadLooksSuccessful(text) {
   if (text.includes('DOWNLOAD_FAILED')) return false;
   if (text.includes('ERROR ')) return false;
   if (text.includes('DOWNLOAD_OK')) return true;
+  if (/\bverifying sha256 digest\b/i.test(text) && /\b100\s*%/.test(text)) return true;
   if (/\bDONE\s+\S/.test(text)) return true;
   if (text.includes('DONE') && text.includes('/snapshots/')) return true;
   if (/\b100%\s*\d+\/\d+/.test(text)) return true;
   if (/100%\|/.test(text)) return true;
   if (/^success\s*$/im.test(text)) return true;
   return false;
+}
+
+function _isOllamaDownload(task) {
+  return (task?.payload?.source || '') === 'ollama';
+}
+
+/** Progress fingerprint for stale detection — Ollama uses log lines, HF uses bytes/%. */
+function _downloadProgressKey(snapshot, task) {
+  if (_isOllamaDownload(task)) {
+    const layerMatches = [...snapshot.matchAll(/(?:pulling|verifying)\s+[^\n]*?(\d+)\s*%/gi)];
+    if (layerMatches.length) {
+      const last = layerMatches[layerMatches.length - 1];
+      return `ollama:${last[1]}:${layerMatches.length}:${snapshot.length}`;
+    }
+    const lines = snapshot.split('\n').map(l => l.trim()).filter(Boolean);
+    return `ollama:lines:${lines.length}:${lines[lines.length - 1] || ''}`;
+  }
+  const pctMatches = [...snapshot.matchAll(/(\d+)%\|/g)];
+  const lastPct = pctMatches.length ? pctMatches[pctMatches.length - 1][1] : null;
+  const _dlAggMatches = [...snapshot.matchAll(/Downloading\s*\(incomplete[^)]*\):\s*(\d+)%/g)];
+  const _dlAgg = _dlAggMatches.length ? parseInt(_dlAggMatches[_dlAggMatches.length - 1][1]) : null;
+  const _byteMatches = [...snapshot.matchAll(/([\d.]+\s?[KMGT])B?\s*\/\s*[\d.]+\s?[KMGT]B?/gi)];
+  const _bytes = _byteMatches.length ? _byteMatches[_byteMatches.length - 1][1].replace(/\s/g, '') : null;
+  return _bytes || (_dlAgg != null ? String(_dlAgg) : (lastPct || '0'));
+}
+
+function _ollamaDownloadBadge(snapshot) {
+  const layerMatches = [...snapshot.matchAll(/(?:pulling|verifying)\s+[^\n]*?(\d+)\s*%/gi)];
+  if (layerMatches.length) {
+    const pct = layerMatches[layerMatches.length - 1][1];
+    return `${pct}%`;
+  }
+  if (/pulling manifest/i.test(snapshot)) return 'manifest…';
+  if (/verifying/i.test(snapshot)) return 'verifying…';
+  if (/Pulling /i.test(snapshot)) return 'starting…';
+  return 'pulling…';
 }
 
 function _fixCompletedDownloadStatus(tasks) {
@@ -752,6 +802,21 @@ function _fixCompletedDownloadStatus(tasks) {
     if ((task.status === 'crashed' || task.status === 'running' || task.status === 'error') && _downloadLooksSuccessful(text)) {
       task.status = 'done';
       if (!task.output && domOut) task.output = domOut;
+      changed = true;
+    }
+  }
+  if (changed) _saveTasks(tasks, true);
+  return changed;
+}
+
+/** queue-* ids are client-side placeholders — never poll them as real sessions. */
+function _repairStuckQueueTasks(tasks) {
+  let changed = false;
+  for (const task of tasks) {
+    if (task.type !== 'download' || !_isQueueSessionId(task.sessionId)) continue;
+    if (task.status === 'running' || task.status === 'crashed' || task.status === 'error') {
+      task.status = 'queued';
+      task._startLaunched = false;
       changed = true;
     }
   }
@@ -812,6 +877,9 @@ function _hydrateTasksFromStatus(statusTasks) {
       if (task.status === 'done' && mappedStatus === 'crashed') {
         /* keep done */
       } else if (task.type === 'download' && mappedStatus === 'crashed' && _downloadLooksSuccessful(task.output || statusText)) {
+        task.status = 'done';
+        changed = true;
+      } else if (task.type === 'download' && mappedStatus === 'crashed' && task.status === 'running' && _downloadLooksSuccessful(statusText)) {
         task.status = 'done';
         changed = true;
       } else {
@@ -949,7 +1017,19 @@ async function _retryTask(el, task) {
 async function _retryDownload(name, payload) {
   try {
     const targetHost = payload?.remote_host || payload?.remoteHost || 'local';
+    const repoKey = _cleanRepoId(payload?.repo_id || name || '');
     const tasks = _loadTasks();
+    const duplicate = tasks.find(
+      t => t.type === 'download'
+        && (t.status === 'running' || t.status === 'queued')
+        && (t.remoteHost || 'local') === targetHost
+        && (_cleanRepoId(t.payload?.repo_id || t.name || '') === repoKey
+          || (t.name || '').toLowerCase() === (name || '').toLowerCase()),
+    );
+    if (duplicate) {
+      uiModule.showToast(`Already downloading ${name} — see Running tab`);
+      return;
+    }
     const activeOnHost = tasks.find(
       t => t.type === 'download'
         && (t.status === 'running' || t.status === 'queued')
@@ -1415,6 +1495,8 @@ export function _renderRunningTab() {
 
   const tasks = _loadTasks();
   _fixCompletedDownloadStatus(tasks);
+  _repairStuckQueueTasks(tasks);
+  _processQueue();
   const hasContent = tasks.length > 0;
 
   let tabBar = body.querySelector('.cookbook-tabs');
@@ -2029,6 +2111,10 @@ export function _renderRunningTab() {
 
     // Wire reconnect
     el.querySelector('.cookbook-task-action-reconnect').addEventListener('click', () => {
+      if (_isQueueSessionId(task.sessionId)) {
+        _startQueuedDownload(task);
+        return;
+      }
       _updateTask(task.sessionId, { status: 'running' });
       el.dataset.status = 'running';
       const badge = el.querySelector('.cookbook-task-status');
@@ -2110,7 +2196,7 @@ export function _renderRunningTab() {
     if (targetBody) targetBody.appendChild(el);
     else group.appendChild(el);
 
-    if (task.status === 'running') {
+    if (task.status === 'running' && !_isQueueSessionId(task.sessionId)) {
       _reconnectTask(el, task);
     }
   }
@@ -2142,6 +2228,7 @@ export function _renderRunningTab() {
 // ── Reconnect task (polling loop) ──
 
 async function _reconnectTask(el, task) {
+  if (_isQueueSessionId(task.sessionId)) return;
   const output = el.querySelector('.cookbook-output-pre');
   const controller = new AbortController();
   el._abort = controller;
@@ -2161,8 +2248,27 @@ async function _reconnectTask(el, task) {
       const data = await res.json();
 
       if (data.exit_code !== 0) {
+        // Capture can fail on large logs even while the process is healthy — verify
+        // liveness before counting toward a crash.
+        try {
+          const verify = await fetch('/api/shell/exec', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`), timeout: 15 }),
+          });
+          const vData = await verify.json();
+          if (vData.exit_code === 0) {
+            failCount = 0;
+            const cached = task.output || output.textContent || '';
+            if (cached && !output.textContent) output.textContent = cached;
+            await new Promise(r => setTimeout(r, TASK_POLL_INTERVAL_MS));
+            continue;
+          }
+        } catch {
+          /* fall through to failure counting */
+        }
         failCount++;
-        if (failCount < 5) {
+        if (failCount < 8) {
           await new Promise(r => setTimeout(r, 5000));
           continue;
         }
@@ -2170,7 +2276,7 @@ async function _reconnectTask(el, task) {
           const verify = await fetch('/api/shell/exec', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`) }),
+            body: JSON.stringify({ command: _tmuxCmd(task, `has-session -t ${task.sessionId}`), timeout: 15 }),
           });
           const vData = await verify.json();
           if (vData.exit_code === 0) {
@@ -2183,7 +2289,7 @@ async function _reconnectTask(el, task) {
           continue;
         }
 
-        const lastOutput = output.textContent || '';
+        const lastOutput = output.textContent || task.output || '';
         const diag = _diagnose(lastOutput);
         if (diag) {
           let diagEl = el.querySelector('.cookbook-diagnosis');
@@ -2200,7 +2306,13 @@ async function _reconnectTask(el, task) {
           _showCookbookNotif(true);
         } else {
           const looksSuccessful = _downloadLooksSuccessful(lastOutput);
-          if (!lastOutput.trim() || (task.type === 'download' && !looksSuccessful)) {
+          if (looksSuccessful) {
+            _updateTask(task.sessionId, { status: 'done', output: lastOutput });
+            el.dataset.status = 'done';
+            const badge = el.querySelector('.cookbook-task-status');
+            if (badge) { badge.textContent = _statusLabel('done', task.type); badge.className = 'cookbook-task-status cookbook-task-done'; }
+            _showCookbookNotif();
+          } else if (!lastOutput.trim() || (task.type === 'download' && !looksSuccessful)) {
             _updateTask(task.sessionId, { status: 'crashed' });
             el.dataset.status = 'crashed';
             const badge = el.querySelector('.cookbook-task-status');
@@ -2248,23 +2360,16 @@ async function _reconnectTask(el, task) {
             const _dlAggMatches = [...snapshot.matchAll(/Downloading\s*\(incomplete[^)]*\):\s*(\d+)%/g)];
             const _dlAgg = _dlAggMatches.length ? parseInt(_dlAggMatches[_dlAggMatches.length - 1][1]) : null;
 
-            // Stale download detection.
-            // Use the DOWNLOADED-BYTE count ("1.81G" from "1.81G/2.49G") as the
-            // progress signal: it climbs continuously while transferring (even when
-            // the % plateaus during a big hf_transfer chunk) and FREEZES when stuck.
-            // The % alone plateaus (false stall), and a frozen frame still shows a
-            // stale speed/ETA — so keying off speed masked real stalls (that's why a
-            // 97%-stuck download went undetected). Bytes are the honest signal; fall
-            // back to %/aggregate only when no byte counter is present.
-            const _STALE_TIMEOUT = STALE_PROGRESS_MS;
-            const _byteMatches = [...snapshot.matchAll(/([\d.]+\s?[KMGT])B?\s*\/\s*[\d.]+\s?[KMGT]B?/gi)];
-            const _bytes = _byteMatches.length ? _byteMatches[_byteMatches.length - 1][1].replace(/\s/g, '') : null;
-            const curProgress = _bytes || (_dlAgg != null ? String(_dlAgg) : (lastPct || '0'));
+            // Stale download detection — HF uses byte/aggregate progress; Ollama uses
+            // log lines and a longer timeout (large layers can sit between updates).
+            const _isOllama = _isOllamaDownload(task);
+            const _STALE_TIMEOUT = _isOllama ? STALE_PROGRESS_MS_OLLAMA : STALE_PROGRESS_MS;
+            const curProgress = _downloadProgressKey(snapshot, task);
             if (!el._lastProgress) { el._lastProgress = curProgress; el._lastProgressTime = Date.now(); }
             if (curProgress !== el._lastProgress) {
               el._lastProgress = curProgress;
               el._lastProgressTime = Date.now();
-            } else if (Date.now() - (el._lastProgressTime || 0) > _STALE_TIMEOUT && task._autoRestarted) {
+            } else if (!_isOllama && Date.now() - (el._lastProgressTime || 0) > _STALE_TIMEOUT && task._autoRestarted) {
               const mins = Math.floor((Date.now() - (el._lastProgressTime || 0)) / 60000);
               // Already auto-restarted once and stalled again — make the badge a
               // one-click retry (resumes from the cached partial files) so the
@@ -2277,7 +2382,20 @@ async function _reconnectTask(el, task) {
                 badge._retryBound = true;
                 badge.addEventListener('click', (e) => { e.stopPropagation(); _retryTask(el, task); });
               }
-            } else if (Date.now() - (el._lastProgressTime || 0) > _STALE_TIMEOUT && !task._autoRestarted) {
+            } else if (_isOllama && Date.now() - (el._lastProgressTime || 0) > _STALE_TIMEOUT) {
+              const mins = Math.floor((Date.now() - (el._lastProgressTime || 0)) / 60000);
+              badge.textContent = mins >= 10 ? `slow ${mins}m ↻` : _ollamaDownloadBadge(snapshot);
+              badge.className = 'cookbook-task-status cookbook-task-running';
+              if (mins >= 10) {
+                badge.className = 'cookbook-task-status cookbook-task-error';
+                badge.title = 'Pull is taking a while — click to retry if stuck';
+                badge.style.cursor = 'pointer';
+                if (!badge._retryBound) {
+                  badge._retryBound = true;
+                  badge.addEventListener('click', (e) => { e.stopPropagation(); _retryTask(el, task); });
+                }
+              }
+            } else if (!_isOllama && Date.now() - (el._lastProgressTime || 0) > _STALE_TIMEOUT && !task._autoRestarted) {
               task._autoRestarted = true;
               _updateTask(task.sessionId, { _autoRestarted: true });
               badge.textContent = 'stale — restarting';
@@ -2291,17 +2409,13 @@ async function _reconnectTask(el, task) {
                 });
               } catch {}
               try {
-                // Reuse original payload so the full repo_id (e.g. "Qwen/Qwen3.5-...")
-                // is preserved — rebuilding from task.repo/task.name drops the org prefix.
                 const dlPayload = task.payload
                   ? { ...task.payload }
                   : { repo_id: _cleanRepoId(task.repo || task.name), remote_host: task.remoteHost || '' };
                 if (_envState.hfToken) dlPayload.hf_token = _envState.hfToken;
-                // Stalled with hf_transfer — restart on the reliable downloader.
-                dlPayload.disable_hf_transfer = true;
-                // Don't overwrite env_prefix — task.payload already has the correct
-                // "source <path>" form. The bare envPath would miss the `source` and
-                // the venv never activates (so hf CLI falls off PATH).
+                if ((dlPayload.source || 'hf') !== 'ollama') {
+                  dlPayload.disable_hf_transfer = true;
+                }
                 const res = await fetch('/api/model/download', {
                   method: 'POST', credentials: 'same-origin',
                   headers: { 'Content-Type': 'application/json' },
@@ -2331,7 +2445,10 @@ async function _reconnectTask(el, task) {
             // Take the higher of the two so resume doesn't read as 0%.
             const _fetchPctMatches = [...snapshot.matchAll(/Fetching\s+\d+\s+files:\s*(\d+)%/g)];
             const _fetchPct = _fetchPctMatches.length ? parseInt(_fetchPctMatches[_fetchPctMatches.length - 1][1]) : null;
-            if (_dlAgg != null) {
+            if (_isOllama) {
+              badge.textContent = _ollamaDownloadBadge(snapshot);
+              badge.className = 'cookbook-task-status cookbook-task-running';
+            } else if (_dlAgg != null) {
               // Real aggregate byte progress — most accurate; take the max of all signals.
               let pct = _dlAgg;
               if (_fetchPct != null) pct = Math.max(pct, _fetchPct);
@@ -2983,6 +3100,8 @@ export function initRunning(shared) {
     try {
       await _syncFromServer();
     } catch {}
+    _repairStuckQueueTasks(_loadTasks());
+    _processQueue();
     _startBackgroundMonitor();
   })();
 }

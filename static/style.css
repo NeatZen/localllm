@@ -545,7 +545,7 @@ body.bg-pattern-sparkles {
       gap: 0.35rem;
     }
     .sidebar-brand-logo {
-      height: 2.5rem;
+      height: 3.5rem;
       width: auto;
       max-width: 100%;
       object-fit: contain;
@@ -1794,7 +1794,7 @@ body.bg-pattern-sparkles {
       align-items: center;
     }
     .welcome-logo {
-      max-width: min(320px, 90vw);
+      max-width: min(480px, 94vw);
       height: auto;
       object-fit: contain;
     }

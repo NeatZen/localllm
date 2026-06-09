@@ -117,7 +117,9 @@ export function wireAIModelSelectors({ container, apiBase, openCookbookForImg2im
           if (!caps.gen && !caps.inpaint) continue;
           // Encode "<base_url>::<model_id>" so the value carries both pieces.
           const value = `${ep.base_url}::${modelId}`;
-          const shortModel = modelId ? String(modelId).split('/').pop() : (ep.name || ep.base_url);
+          const shortModel = modelId
+            ? String(modelId).replace(/\\/g, '/').split('/').pop()
+            : (ep.name || ep.base_url);
           const epHint = modelId && ep.name && ep.name !== modelId ? ` · ${ep.name}` : '';
           const label = `${shortModel}${epHint}${epUsable ? '' : ' (offline)'}`;
           if (caps.gen && aiGenSelect) {

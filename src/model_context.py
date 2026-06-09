@@ -193,6 +193,16 @@ def _lookup_known(model: str) -> Optional[int]:
 
 def _query_context_length(endpoint_url: str, model: str) -> int:
     """Query the model API for context length."""
+    try:
+        from services.bundled_llm import is_bundled_endpoint_url, serving_n_ctx
+
+        if is_bundled_endpoint_url(endpoint_url):
+            n_ctx = serving_n_ctx()
+            logger.info("Bundled LLM serving n_ctx=%s (not catalog %s)", n_ctx, _lookup_known(model))
+            return n_ctx
+    except Exception:
+        pass
+
     known = _lookup_known(model)
     api_ctx = None
 

@@ -496,7 +496,8 @@ const IMAGE_PRICING = {
 export function shortModel(name) {
   if (!name) return '...';
   if (typeof name !== 'string') name = String(name);
-  let short = name.split('/').pop();
+  // Windows GGUF paths use backslashes — normalize before taking the filename.
+  let short = name.replace(/\\/g, '/').split('/').pop() || name;
   // Strip .gguf extension
   short = short.replace(/\.gguf$/i, '');
   // Strip quantization suffixes (Q4_K_M, Q8_0, etc.) and shard numbers
@@ -1726,7 +1727,7 @@ export function displayMetrics(messageElement, metrics) {
 
       const usedTokens = inputTokens || 0;
       const totalCtx = ctxLen || 0;
-      const modelShort = model.split('/').pop();
+      const modelShort = shortModel(model);
       const fmtNum = n => n ? n.toLocaleString() : '?';
 
       const popup = document.createElement('div');

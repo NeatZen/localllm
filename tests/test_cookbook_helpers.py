@@ -9,6 +9,7 @@ from routes.cookbook_helpers import (
     _validate_cache_repo_id,
     _validate_gpus,
     _validate_ssh_port,
+    ollama_pull_ps_block,
     windows_powershell_exe,
 )
 
@@ -63,6 +64,14 @@ def test_validate_cache_repo_id_rejects_ollama_refs_without_flag():
 def test_validate_cache_repo_id_accepts_hf_and_local_ids():
     assert _validate_cache_repo_id("Qwen/Qwen3-8B") == "Qwen/Qwen3-8B"
     assert _validate_cache_repo_id("DeepSeek-Coder-V2-Lite-Instruct-GGUF", is_local_dir=True) == "DeepSeek-Coder-V2-Lite-Instruct-GGUF"
+
+
+def test_ollama_pull_ps_block_streams_live():
+    lines = ollama_pull_ps_block("qwen3.6:27b")
+    joined = "\n".join(lines)
+    assert "$pullOut" not in joined
+    assert "ForEach-Object" in joined
+    assert "ollama pull" in joined
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")

@@ -12,6 +12,8 @@ import re
 import time
 from typing import Any
 
+import httpx
+
 _SEARCH_URL = "https://ollama.com/search"
 _LIBRARY_URL = "https://ollama.com/library"
 _USER_AGENT = "NeatAi/1.0 (+https://github.com/neatai)"

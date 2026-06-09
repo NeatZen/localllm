@@ -70,8 +70,8 @@ export const ERROR_PATTERNS = [
     ],
   },
   {
-    pattern: /CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory/i,
-    message: 'GPU ran out of memory. Try more GPUs (higher TP) or lower context.',
+    pattern: /CUDA out of memory|torch\.cuda\.OutOfMemoryError|CUDA error: out of memory|cudaMalloc failed: out of memory|unable to allocate CUDA\d* buffer/i,
+    message: 'GPU ran out of memory. Stop other GPU jobs (Ollama pulls/serves), use a smaller quant, or lower context.',
     fixes: [
       { label: 'Retry with TP=2', action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '2') },
       { label: 'Retry with TP=4', action: (panel) => _serveAutoRetryReplace(panel, '--tensor-parallel-size', '4') },

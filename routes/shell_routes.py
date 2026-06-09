@@ -102,8 +102,11 @@ async def _exec_shell(command: str, timeout: int = EXEC_TIMEOUT) -> Dict[str, An
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
         )
-        stdout = stdout_b.decode(errors="replace")[:MAX_OUTPUT]
-        stderr = stderr_b.decode(errors="replace")[:MAX_OUTPUT]
+        stdout_raw = stdout_b.decode(errors="replace")
+        stderr_raw = stderr_b.decode(errors="replace")
+        # Keep the tail — log captures put the newest lines at the end.
+        stdout = stdout_raw[-MAX_OUTPUT:] if len(stdout_raw) > MAX_OUTPUT else stdout_raw
+        stderr = stderr_raw[-MAX_OUTPUT:] if len(stderr_raw) > MAX_OUTPUT else stderr_raw
         return {"stdout": stdout, "stderr": stderr, "exit_code": proc.returncode}
     except asyncio.TimeoutError:
         if proc:
@@ -373,8 +376,9 @@ def setup_shell_routes() -> APIRouter:
         if not cmd:
             return {"stdout": "", "stderr": "No command provided", "exit_code": 1}
 
-        logger.info("User shell exec requested: length=%d", len(cmd))
-        result = await _exec_shell(cmd, timeout=EXEC_TIMEOUT)
+        timeout = req.timeout if req.timeout is not None else EXEC_TIMEOUT
+        logger.info("User shell exec requested: length=%d timeout=%s", len(cmd), timeout)
+        result = await _exec_shell(cmd, timeout=timeout)
         return result
 
     @router.post("/api/shell/stream")

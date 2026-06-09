@@ -601,6 +601,42 @@ async def llm_call_async(
                 raise HTTPException(502, f"POST {target_url} failed after {max_retries} attempts: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
 
+
+# llama-cpp-python streaming can stop early when max_tokens is omitted (0).
+_LOCAL_STREAM_DEFAULT_MAX_TOKENS = 2048
+_LOCAL_STREAM_RESERVE_TOKENS = 512
+
+
+def _effective_stream_max_tokens(
+    url: str,
+    model: str,
+    messages: List[Dict],
+    max_tokens: int,
+) -> int:
+    """Resolve max_tokens for local OpenAI-compatible streaming endpoints."""
+    if max_tokens and max_tokens > 0:
+        return max_tokens
+    try:
+        from src.model_context import _is_local_endpoint, estimate_tokens, get_context_length
+    except ImportError:
+        from model_context import _is_local_endpoint, estimate_tokens, get_context_length
+    if not _is_local_endpoint(url):
+        return 0
+    ctx = get_context_length(url, model)
+    prompt_est = estimate_tokens(messages)
+    headroom = ctx - prompt_est - _LOCAL_STREAM_RESERVE_TOKENS
+    if headroom < 256:
+        return max(64, headroom)
+    resolved = min(_LOCAL_STREAM_DEFAULT_MAX_TOKENS, headroom)
+    logger.debug(
+        "Local stream max_tokens=%s (ctx=%s, prompt~=%s)",
+        resolved,
+        ctx,
+        prompt_est,
+    )
+    return resolved
+
+
 async def stream_llm(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
@@ -630,10 +666,12 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     else:
         messages_copy = non_sys
 
+    stream_max_tokens = _effective_stream_max_tokens(url, model, messages_copy, max_tokens)
+
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
         h = _build_anthropic_headers(headers)
-        payload = _build_anthropic_payload(model, messages_copy, temperature, max_tokens, stream=True, tools=tools)
+        payload = _build_anthropic_payload(model, messages_copy, temperature, stream_max_tokens, stream=True, tools=tools)
     else:
         target_url = url
         payload = {
@@ -643,9 +681,9 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if max_tokens and max_tokens > 0:
+        if stream_max_tokens and stream_max_tokens > 0:
             tok_key = "max_completion_tokens" if _uses_max_completion_tokens(model) else "max_tokens"
-            payload[tok_key] = max_tokens
+            payload[tok_key] = stream_max_tokens
         if tools:
             payload["tools"] = tools
         h = {"Content-Type": "application/json"}

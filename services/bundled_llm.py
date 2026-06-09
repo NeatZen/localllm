@@ -117,6 +117,14 @@ def base_url() -> str:
     return f"http://{BUNDLED_LLM_HOST}:{BUNDLED_LLM_PORT}/v1"
 
 
+def serving_n_ctx() -> int:
+    """Actual --n_ctx the bundled llama_cpp.server was started with."""
+    try:
+        return int(os.getenv("BUNDLED_LLM_N_CTX", "4096"))
+    except ValueError:
+        return 4096
+
+
 def get_status() -> dict[str, Any]:
     active = get_active_model_config()
     out = dict(_status)
@@ -367,6 +375,8 @@ def _live_model_ids() -> list[str]:
 
 def is_bundled_endpoint_url(url: str) -> bool:
     normalized = (url or "").rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        normalized = normalized[: -len("/chat/completions")]
     return normalized == base_url().rstrip("/") or normalized.endswith(
         f":{BUNDLED_LLM_PORT}/v1"
     )

@@ -25,10 +25,12 @@ logger = logging.getLogger(__name__)
 from routes.cookbook_helpers import (
     _SSH_PORT_RE, _REMOTE_HOST_RE, _SESSION_ID_RE,
     _validate_repo_id, _validate_ollama_model, _validate_include, _validate_remote_host, _validate_token,
+    _is_ollama_serve_cmd,
     OLLAMA_MIN_RECOMMENDED, get_local_ollama_version, ollama_version_outdated, ollama_pull_ps_block,
     _run_python_script, _run_shell_command, list_local_ollama_models,
     _validate_local_dir, _validate_ssh_port, _validate_gpus, _shell_path,
-    _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
+    _ps_squote, _bash_squote, _write_ps_runner, _ps_serve_ok_ollama,
+    _validate_serve_cmd, _parse_serve_phase,
     _safe_env_prefix, windows_powershell_exe,
     delete_cached_model_local, delete_ollama_model_local, sync_chat_models_after_cache_delete,
     _validate_cache_repo_id,
@@ -442,18 +444,20 @@ def setup_cookbook_routes() -> APIRouter:
             return False
 
     def _read_local_session_logs(session_id: str, tail: int = 20) -> str:
+        """Return the last *tail* lines without reading whole multi-MB log files."""
+        from collections import deque
+
         sd = _local_session_dir()
-        log_file = sd / f"{session_id}.log"
-        err_file = sd / f"{session_id}.err.log"
-        chunks = []
-        for path in (log_file, err_file):
-            if path.exists():
-                try:
-                    chunks.append(path.read_text(encoding="utf-8", errors="replace"))
-                except Exception:
-                    pass
-        text = "\n".join(chunks)
-        lines = text.splitlines()
+        lines: list[str] = []
+        for name in (f"{session_id}.log", f"{session_id}.err.log"):
+            path = sd / name
+            if not path.exists():
+                continue
+            try:
+                with path.open(encoding="utf-8", errors="replace") as fh:
+                    lines.extend(ln.rstrip() for ln in deque(fh, maxlen=tail))
+            except Exception:
+                pass
         return "\n".join(lines[-tail:]).strip()
 
     def _discover_orphan_local_sessions(known_ids: set[str]) -> list[dict]:
@@ -676,7 +680,7 @@ def setup_cookbook_routes() -> APIRouter:
                 ]
                 if req.env_prefix:
                     ps_lines.insert(3, _safe_env_prefix(req.env_prefix))
-                runner_ps.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
+                _write_ps_runner(runner_ps, ps_lines)
                 _pid, spawn_err = await asyncio.to_thread(
                     _spawn_detached_local_ps1, runner_ps, session_id, session_dir
                 )
@@ -699,7 +703,7 @@ def setup_cookbook_routes() -> APIRouter:
                     f'Remove-Item -Force "$HOME\\{remote_runner}" -ErrorAction SilentlyContinue',
                 ])
                 runner_path = TMUX_LOG_DIR / f"{session_id}_run.ps1"
-                runner_path.write_text("\r\n".join(ps_lines) + "\r\n")
+                _write_ps_runner(runner_path, ps_lines)
                 _port = req.ssh_port
                 _Pf = f"-P {_port} " if _port and _port != "22" else ""
                 _pf = f"-p {_port} " if _port and _port != "22" else ""
@@ -877,7 +881,7 @@ def setup_cookbook_routes() -> APIRouter:
             ps_lines.append('}}')
             ps_lines.append(f'Remove-Item -Force "$HOME\\{remote_runner}" -ErrorAction SilentlyContinue')
             runner_path = TMUX_LOG_DIR / f"{session_id}_run.ps1"
-            runner_path.write_text("\r\n".join(ps_lines) + "\r\n")
+            _write_ps_runner(runner_path, ps_lines)
 
             # scp the .ps1 script, then launch it as a detached process with log + pid files
             _port = req.ssh_port
@@ -996,7 +1000,7 @@ def setup_cookbook_routes() -> APIRouter:
                     '}',
                 ]
             )
-            runner_ps.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
+            _write_ps_runner(runner_ps, ps_lines)
 
             _pid, spawn_err = await asyncio.to_thread(
                 _spawn_detached_local_ps1, runner_ps, session_id, session_dir
@@ -1129,12 +1133,24 @@ def setup_cookbook_routes() -> APIRouter:
         paths_code += "    candidates = []\n"
         paths_code += "    for sd in os.listdir(snap):\n"
         paths_code += "        sf = os.path.join(snap, sd)\n"
+        paths_code += "        if os.path.isfile(sf) and sd.endswith('.gguf'):\n"
+        paths_code += "            candidates.append(sf); continue\n"
         paths_code += "        if not os.path.isdir(sf): continue\n"
         paths_code += "        try:\n"
         paths_code += "            for fn in os.listdir(sf):\n"
         paths_code += "                if fn.endswith('.gguf'): candidates.append(os.path.join(sf, fn))\n"
         paths_code += "        except Exception:\n"
         paths_code += "            pass\n"
+        paths_code += "    if not candidates: return ''\n"
+        paths_code += "    multi = [c for c in candidates if '-00001-of-' in os.path.basename(c)]\n"
+        paths_code += "    pool = sorted(multi) if multi else sorted(candidates)\n"
+        paths_code += "    return pool[0]\n"
+        paths_code += "def _best_gguf_in_dir(root):\n"
+        paths_code += "    if not os.path.isdir(root): return ''\n"
+        paths_code += "    candidates = []\n"
+        paths_code += "    for dp, _, fns in safe_walk(root):\n"
+        paths_code += "        for fn in fns:\n"
+        paths_code += "            if fn.endswith('.gguf'): candidates.append(os.path.join(dp, fn))\n"
         paths_code += "    if not candidates: return ''\n"
         paths_code += "    multi = [c for c in candidates if '-00001-of-' in os.path.basename(c)]\n"
         paths_code += "    pool = sorted(multi) if multi else sorted(candidates)\n"
@@ -1205,7 +1221,8 @@ def setup_cookbook_routes() -> APIRouter:
         paths_code += "                try: nf += 1; sz += os.path.getsize(os.path.join(dp, fn))\n"
         paths_code += "                except Exception: pass\n"
         paths_code += "        is_diff = os.path.exists(os.path.join(fp, 'model_index.json'))\n"
-        paths_code += "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_gguf':is_gguf})\n"
+        paths_code += "        gguf_file = _best_gguf_in_dir(fp) if is_gguf else ''\n"
+        paths_code += "        models.append({'repo_id':d,'size_bytes':sz,'nb_files':nf,'has_incomplete':False,'path':p,'is_local_dir':True,'is_diffusion':is_diff,'is_gguf':is_gguf,'gguf_file':gguf_file})\n"
         # Always scan HF cache
         paths_code += "scan_hf(os.path.expanduser('~/.cache/huggingface/hub'))\n"
         # Also scan custom model dirs (comma-separated) if specified
@@ -1453,7 +1470,10 @@ def setup_cookbook_routes() -> APIRouter:
             ):
                 raise HTTPException(400, "Invalid pip package name")
         else:
-            _validate_repo_id(req.repo_id)
+            if _is_ollama_serve_cmd(req.cmd):
+                req.repo_id = _validate_ollama_model(req.repo_id)
+            else:
+                _validate_repo_id(req.repo_id)
         TMUX_LOG_DIR.mkdir(parents=True, exist_ok=True)
         session_id = f"serve-{uuid.uuid4().hex[:8]}"
         remote = req.remote_host
@@ -1505,7 +1525,7 @@ def setup_cookbook_routes() -> APIRouter:
             ps_lines.append('Write-Host ""')
             ps_lines.append('Write-Host "=== Process exited with code $LASTEXITCODE ==="')
             runner_path = TMUX_LOG_DIR / f"{session_id}_run.ps1"
-            runner_path.write_text("\r\n".join(ps_lines) + "\r\n")
+            _write_ps_runner(runner_path, ps_lines)
 
             _port = req.ssh_port
             _Pf = f"-P {_port} " if _port and _port != "22" else ""
@@ -1551,9 +1571,13 @@ def setup_cookbook_routes() -> APIRouter:
                 ps_lines.append('Write-Host "ERROR: vLLM is not supported on Windows. Use llama.cpp instead."')
                 ps_lines.append('exit 1')
             ps_lines.append(req.cmd)
+            if _is_ollama_serve_cmd(req.cmd):
+                ps_lines.append('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }')
+                ps_lines.append(_ps_serve_ok_ollama(req.repo_id))
+                ps_lines.append('while ($true) { Start-Sleep -Seconds 3600 }')
             ps_lines.append('Write-Host ""')
             ps_lines.append('Write-Host "=== Process exited with code $LASTEXITCODE ==="')
-            runner_ps.write_text("\r\n".join(ps_lines) + "\r\n", encoding="utf-8")
+            _write_ps_runner(runner_ps, ps_lines)
 
             _pid, spawn_err = await asyncio.to_thread(
                 _spawn_detached_local_ps1, runner_ps, session_id, session_dir

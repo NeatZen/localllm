@@ -1408,57 +1408,10 @@ async def stream_agent_loop(
     prep_timings["tool_selection"] = time.time() - _t1
 
     _t2 = time.time()
-    # Hosted-API match by URL, OR the model name looks like a recent model
-    # known to follow OpenAI-style function calling (DeepSeek, GPT*, Claude,
-    # Gemini, Qwen3+, Mixtral, Llama 3.1+). Caught the DeepSeek-via-local-
-    # vLLM case where endpoint_url doesn't include a vendor host.
-    _model_lc = (model or "").lower()
-    # Step 1: per-endpoint override (set at registration time from the
-    # serve command — `--enable-auto-tool-choice` flips it on. UI can
-    # also toggle per endpoint). NULL = unknown, fall through to the
-    # keyword heuristic + host check.
-    _endpoint_supports: Optional[bool] = None
-    try:
-        from core.database import SessionLocal as _SL, ModelEndpoint as _ME
-        _db = _SL()
-        try:
-            _ep = _db.query(_ME).filter(_ME.base_url == endpoint_url).first()
-            if not _ep and endpoint_url:
-                _u = endpoint_url.rstrip("/")
-                _ep = _db.query(_ME).filter(_ME.base_url == _u).first() or \
-                      _db.query(_ME).filter(_ME.base_url == _u + "/").first()
-            if _ep is not None:
-                _endpoint_supports = _ep.supports_tools
-        finally:
-            _db.close()
-    except Exception as _e:
-        logger.debug(f"endpoint supports_tools lookup failed: {_e}")
-    _model_supports_tools = any(kw in _model_lc for kw in (
-        "deepseek", "gpt-4", "gpt-5", "gpt-o", "claude", "gemini",
-        "qwen3", "qwen2.5", "mixtral", "mistral", "llama-3.1", "llama-3.2",
-        "llama-3.3", "llama-4",
-        # Local-served models that follow OpenAI-style function calling
-        # via vLLM's `--enable-auto-tool-choice`. Belt-and-suspenders
-        # with the per-endpoint flag above.
-        "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
-        "glm-4", "internlm", "hermes",
-    ))
-    if _endpoint_supports is True:
-        _is_api_model = True
-    elif _endpoint_supports is False:
-        _is_api_model = False
-    else:
-        _is_api_model = any(h in endpoint_url for h in _API_HOSTS) or _model_supports_tools
-    # Built-in llama.cpp server is not started with native function-calling
-    # unless the endpoint is explicitly flagged. Sending OpenAI tool schemas to
-    # it produces empty/tool-less replies (looks like "Done." in workspace UI).
-    try:
-        from services.bundled_llm import is_bundled_endpoint_url
-        if is_bundled_endpoint_url(endpoint_url) and _endpoint_supports is not True:
-            _is_api_model = False
-            logger.info("[agent] bundled local endpoint — fenced tool blocks only")
-    except Exception:
-        pass
+    from src.endpoint_resolver import endpoint_supports_native_tools
+    _is_api_model = endpoint_supports_native_tools(endpoint_url, model)
+    if not _is_api_model:
+        logger.info("[agent] fenced tool blocks only — %s does not support native tools", model)
     messages, mcp_schemas = _build_system_prompt(
         messages, model, active_document, mcp_mgr, disabled_tools,
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
@@ -1583,10 +1536,8 @@ async def stream_agent_loop(
                     and t.get("name") not in disabled_tools
                 ]
         else:
-            # Local: only MCP schemas when message suggests MCP tool usage
-            _last_content = _last_user.lower()
-            _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
-            all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
+            # Local models without native tool support use fenced blocks only.
+            all_tool_schemas = []
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]

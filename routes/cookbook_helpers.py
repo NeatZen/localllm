@@ -45,6 +45,13 @@ _GPU_LIST_RE = re.compile(r"^\d+(?:,\d+)*$")
 _LOCAL_DIR_RE = re.compile(r"^~?/[A-Za-z0-9._/-]*$|^~$")
 
 
+def _is_ollama_serve_cmd(cmd: str | None) -> bool:
+    if not cmd:
+        return False
+    stripped = cmd.strip()
+    return stripped == "ollama" or stripped.startswith("ollama ")
+
+
 def _validate_repo_id(v: str | None) -> str:
     v = (v or "").strip().rstrip(".")
     if not v or not _REPO_ID_RE.match(v):
@@ -135,6 +142,17 @@ def _ps_squote(v: str) -> str:
     Belt-and-suspenders on top of _validate_token's regex — if the regex
     is ever loosened, this still keeps the heredoc shell-safe."""
     return v.replace("'", "''")
+
+
+def _write_ps_runner(path: Path, lines: list[str]) -> None:
+    """Write a .ps1 runner with UTF-8 BOM so Windows PowerShell 5.1 parses it."""
+    path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8-sig")
+
+
+def _ps_serve_ok_ollama(model_ref: str) -> str:
+    """Status line for a successful Ollama serve (ASCII-only, single-quoted)."""
+    ref = _ps_squote(model_ref)
+    return f"Write-Host 'SERVE_OK - chat via Ollama at http://127.0.0.1:11434/v1 model={ref}'"
 
 
 def _bash_squote(v: str) -> str:
@@ -451,11 +469,10 @@ def ollama_version_outdated(ver: tuple[int, int, int] | None) -> bool:
 
 
 def ollama_pull_ps_block(model_ref: str) -> list[str]:
-    """Run ``ollama pull`` and mirror stderr progress/errors into session stdout log."""
+    """Run ``ollama pull`` with live log streaming (no buffering until complete)."""
     q = _ps_squote(model_ref)
     return [
-        f"$pullOut = & ollama pull '{q}' 2>&1",
-        "$pullOut | ForEach-Object { Write-Host $_ }",
+        f"& ollama pull '{q}' 2>&1 | ForEach-Object {{ Write-Host $_ }}",
         'if ($LASTEXITCODE -ne 0) { Write-Host ""; Write-Host "DOWNLOAD_FAILED (exit $LASTEXITCODE)"; exit $LASTEXITCODE }',
         'Write-Host ""',
         'Write-Host "DOWNLOAD_OK"',

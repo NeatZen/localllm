@@ -253,6 +253,7 @@ export function _detectToolParser(modelName) {
 
 export function _detectBackend(model) {
   const q = (model.quant || '').toUpperCase();
+  const _nm = `${model.repo_id || ''} ${model.path || ''} ${model.name || ''}`.toLowerCase();
   const sysBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
   const isRocm = sysBackend === 'rocm';
 
@@ -261,8 +262,14 @@ export function _detectBackend(model) {
     return { backend: 'diffusers', label: 'Diffusers' };
   }
 
-  // Windows → default to llama.cpp (no vLLM support on Windows)
+  // Windows → Ollama models use Ollama; GGUF uses llama.cpp (no vLLM on Windows).
   if (_isWindows()) {
+    if (model.is_ollama || model.path === 'ollama' || model.source === 'ollama') {
+      return { backend: 'ollama', label: 'Ollama' };
+    }
+    if (model.is_gguf || model.gguf_file || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf')) {
+      return { backend: 'llamacpp', label: 'llama.cpp' };
+    }
     return { backend: 'llamacpp', label: 'llama.cpp' };
   }
 
@@ -274,8 +281,7 @@ export function _detectBackend(model) {
   // GGUF → llama.cpp. Match the quant tag OR a gguf hint in the repo/path/name:
   // a raw .gguf file often has no quant field, which made it fall through to the
   // vLLM default below.
-  const _nm = `${model.repo_id || ''} ${model.path || ''} ${model.name || ''}`.toLowerCase();
-  if (model.is_gguf || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf')) {
+  if (model.is_gguf || model.gguf_file || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf')) {
     return { backend: 'llamacpp', label: 'llama.cpp' };
   }
 
@@ -331,6 +337,21 @@ function _buildEnvPrefixWindows() {
   if (_envState.gpus) parts.push('$env:CUDA_VISIBLE_DEVICES=' + _psQuote(_envState.gpus));
   if (parts.length === 0) return '';
   return parts.join('; ') + ';';
+}
+
+/** Resolve a concrete .gguf path for llama.cpp. Never returns bash $(find…) on Windows. */
+export function _resolveGgufPathForServe(m, repo, serveHost) {
+  if (m?.gguf_file) {
+    return m.gguf_file.replace(/\\/g, '/');
+  }
+  if (_isWindows() && !serveHost) {
+    return null;
+  }
+  const dir = `"$HOME/.cache/huggingface/hub/models--${repo.replace(/\//g, '--')}/snapshots"`;
+  const _ldir = `"${m.path}/${repo}"`;
+  return m.is_local_dir && m.path
+    ? `$({ find ${_ldir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${_ldir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`
+    : `$({ find ${dir} -name '*-00001-of-*.gguf' 2>/dev/null | sort; find ${dir} -name '*.gguf' 2>/dev/null | sort; } | head -1)`;
 }
 
 export function _buildServeCmd(f, modelName, backend) {
@@ -407,11 +428,15 @@ export function _buildServeCmd(f, modelName, backend) {
       cmd += ` || ${_lcpServer}`;
     }
   } else if (backend === 'ollama') {
-    const ollamaName = modelName.split('/').pop().toLowerCase().replace(/[-_]gguf$/i, '');
-    const ollamaPort = f.port || '11434';
-    const hostEnv = ollamaPort !== '11434' ? `OLLAMA_HOST=0.0.0.0:${ollamaPort} ` : '';
-    // Start serve in background if not running, then pull model
-    cmd = `${hostEnv}ollama serve &>/dev/null & sleep 2 && ${hostEnv}ollama pull ${ollamaName} && wait`;
+    const ollamaRef = modelName.includes('/') ? modelName.split('/').pop() : modelName;
+    if (_isWindows()) {
+      // Ollama daemon already serves on 11434 — just ensure the model is present.
+      cmd = `ollama pull ${ollamaRef}`;
+    } else {
+      const ollamaPort = f.port || '11434';
+      const hostEnv = ollamaPort !== '11434' ? `OLLAMA_HOST=0.0.0.0:${ollamaPort} ` : '';
+      cmd = `${hostEnv}ollama serve &>/dev/null & sleep 2 && ${hostEnv}ollama pull ${ollamaRef} && wait`;
+    }
   } else if (backend === 'diffusers') {
     const gpuStr = f.gpus?.trim();
     if (gpuStr) cmd += `CUDA_VISIBLE_DEVICES=${gpuStr} `;
@@ -2081,6 +2106,7 @@ const shared = {
   _isWindows,
   _buildEnvPrefix,
   _buildServeCmd,
+  _resolveGgufPathForServe,
   _shellQuote,
   _psQuote,
   _detectBackend,

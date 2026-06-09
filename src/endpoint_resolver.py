@@ -257,6 +257,74 @@ def resolve_endpoint_by_id(
         db.close()
 
 
+_API_TOOL_HOSTS = frozenset([
+    "api.openai.com", "api.anthropic.com",
+    "openrouter.ai", "api.groq.com",
+    "api.mistral.ai", "api.cohere.com",
+    "api.deepseek.com", "deepseek.com",
+    "api.together.xyz", "api.fireworks.ai",
+    "api.perplexity.ai", "api.x.ai",
+])
+
+_TOOL_CAPABLE_MODEL_KEYWORDS = (
+    "deepseek", "gpt-4", "gpt-5", "gpt-o", "claude", "gemini",
+    "qwen3", "qwen2.5", "mixtral", "mistral", "llama-3.1", "llama-3.2",
+    "llama-3.3", "llama-4",
+    "minimax", "kimi", "yi-", "phi-3", "phi-4", "command-r",
+    "glm-4", "internlm", "hermes",
+)
+
+
+def lookup_endpoint_supports_tools(chat_url: str) -> Optional[bool]:
+    """Return the per-endpoint supports_tools flag, or None if unknown."""
+    base = normalize_base(chat_url)
+    if not base:
+        return None
+    db = SessionLocal()
+    try:
+        ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base).first()
+        if not ep and not base.endswith("/"):
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base + "/").first()
+        if not ep and base.endswith("/"):
+            ep = db.query(ModelEndpoint).filter(ModelEndpoint.base_url == base.rstrip("/")).first()
+        return ep.supports_tools if ep is not None else None
+    except Exception as exc:
+        logger.debug("supports_tools lookup failed for %s: %s", base, exc)
+        return None
+    finally:
+        db.close()
+
+
+def endpoint_supports_native_tools(chat_url: str, model: str) -> bool:
+    """True when OpenAI-style tool schemas may be sent to this endpoint/model."""
+    url_lc = (chat_url or "").lower()
+    model_lc = (model or "").lower()
+    base_lc = normalize_base(chat_url).lower()
+
+    try:
+        from services.bundled_llm import is_bundled_endpoint_url
+        if is_bundled_endpoint_url(chat_url):
+            return lookup_endpoint_supports_tools(chat_url) is True
+    except Exception:
+        pass
+
+    flagged = lookup_endpoint_supports_tools(chat_url)
+    if flagged is True:
+        return True
+    if flagged is False:
+        return False
+
+    # Default Ollama library models reject OpenAI tool payloads (HTTP 400).
+    if ":11434" in base_lc or "ollama.ai" in base_lc:
+        return False
+
+    if any(h in url_lc for h in _API_TOOL_HOSTS):
+        return True
+    if any(kw in model_lc for kw in _TOOL_CAPABLE_MODEL_KEYWORDS):
+        return True
+    return False
+
+
 def resolve_chat_fallback_candidates() -> list:
     """Build the configured default-chat fallback chain as a list of
     (chat_url, model, headers) tuples, skipping any that can't resolve.
