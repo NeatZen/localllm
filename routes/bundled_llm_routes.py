@@ -29,4 +29,11 @@ def setup_bundled_llm_routes() -> APIRouter:
         ok = await bundled_llm.ensure_ready()
         return {"ok": ok, **bundled_llm.get_status()}
 
+    @router.post("/api/bundled-llm/restart")
+    async def bundled_llm_restart():
+        if not bundled_llm.is_enabled():
+            return {"ok": False, "error": "Bundled LLM is disabled"}
+        ok = await bundled_llm.restart_server()
+        return {"ok": ok, **bundled_llm.get_status()}
+
     return router

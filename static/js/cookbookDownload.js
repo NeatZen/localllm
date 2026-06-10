@@ -75,6 +75,9 @@ export function _buildDownloadCmd(model, backend) {
 import sys, time, os
 os.environ['HF_HUB_DISABLE_PROGRESS_BARS']='0'
 os.environ['TQDM_DISABLE']='0'
+if sys.platform=='win32':
+ os.environ.setdefault('HF_HUB_DISABLE_SYMLINKS','1')
+ os.environ.setdefault('HF_HUB_DISABLE_SYMLINKS_WARNING','1')
 _lp={}
 class T:
  def __init__(s,*a,**k):

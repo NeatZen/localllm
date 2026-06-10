@@ -603,8 +603,12 @@ async def llm_call_async(
 
 
 # llama-cpp-python streaming can stop early when max_tokens is omitted (0).
-_LOCAL_STREAM_DEFAULT_MAX_TOKENS = 2048
 _LOCAL_STREAM_RESERVE_TOKENS = 512
+
+
+def _local_stream_completion_cap(context_length: int) -> int:
+    """Max completion tokens for a local stream — scale with serving context."""
+    return min(4096, max(2048, context_length // 2))
 
 
 def _effective_stream_max_tokens(
@@ -627,7 +631,8 @@ def _effective_stream_max_tokens(
     headroom = ctx - prompt_est - _LOCAL_STREAM_RESERVE_TOKENS
     if headroom < 256:
         return max(64, headroom)
-    resolved = min(_LOCAL_STREAM_DEFAULT_MAX_TOKENS, headroom)
+    cap = _local_stream_completion_cap(ctx)
+    resolved = min(cap, headroom)
     logger.debug(
         "Local stream max_tokens=%s (ctx=%s, prompt~=%s)",
         resolved,

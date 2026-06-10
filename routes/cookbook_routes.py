@@ -850,6 +850,8 @@ def setup_cookbook_routes() -> APIRouter:
             ps_lines = []
             ps_lines.append('$sessionDir = "$env:TEMP\\neatai-sessions"')
             ps_lines.append('New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null')
+            ps_lines.append('$env:HF_HUB_DISABLE_SYMLINKS = "1"')
+            ps_lines.append('$env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"')
             if req.hf_token:
                 ps_lines.append(f"$env:HF_TOKEN = '{_ps_squote(req.hf_token)}'")
             if req.env_prefix:
@@ -974,6 +976,8 @@ def setup_cookbook_routes() -> APIRouter:
                 'New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null',
                 '$env:HF_HUB_ENABLE_HF_TRANSFER = "0"',
                 '$env:HF_HUB_DOWNLOAD_MAX_WORKERS = "2"',
+                '$env:HF_HUB_DISABLE_SYMLINKS = "1"',
+                '$env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"',
                 '$env:PYTHONUNBUFFERED = "1"',
                 f'$py = "{py_exe}"',
                 f'$script = "{hf_script}"',

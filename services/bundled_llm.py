@@ -120,9 +120,28 @@ def base_url() -> str:
 def serving_n_ctx() -> int:
     """Actual --n_ctx the bundled llama_cpp.server was started with."""
     try:
-        return int(os.getenv("BUNDLED_LLM_N_CTX", "4096"))
+        return int(os.getenv("BUNDLED_LLM_N_CTX", "8192"))
     except ValueError:
-        return 4096
+        return 8192
+
+
+def _serving_n_ctx_marker() -> Path:
+    return models_dir() / "serving_n_ctx.txt"
+
+
+def _read_serving_n_ctx_marker() -> str | None:
+    path = _serving_n_ctx_marker()
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except Exception:
+        return None
+
+
+def _write_serving_n_ctx_marker() -> None:
+    models_dir().mkdir(parents=True, exist_ok=True)
+    _serving_n_ctx_marker().write_text(f"{serving_n_ctx()}\n", encoding="utf-8")
 
 
 def get_status() -> dict[str, Any]:
@@ -323,11 +342,35 @@ def _resolve_n_gpu_layers() -> str:
         return "0"
 
 
+def _pids_listening_on_port(port: int) -> list[int]:
+    """Return PIDs listening on a TCP port (Windows netstat)."""
+    try:
+        result = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        needle = f":{port}"
+        pids: list[int] = []
+        for line in result.stdout.splitlines():
+            if "LISTENING" not in line or needle not in line:
+                continue
+            parts = line.split()
+            if parts and parts[-1].isdigit():
+                pids.append(int(parts[-1]))
+        return list(dict.fromkeys(pids))
+    except Exception as e:
+        logger.warning("Failed to list PIDs on port %s: %s", port, e)
+        return []
+
+
 def _kill_orphaned_server_processes() -> None:
     """Stop leftover llama_cpp.server processes from prior NeatAi runs."""
     global _process
-    port_flag = f"--port {BUNDLED_LLM_PORT}"
     keep_pid = _process.pid if _process is not None and _process.poll() is None else None
+    killed: set[int] = set()
     try:
         if sys.platform == "win32":
             ps_cmd = (
@@ -351,11 +394,23 @@ def _kill_orphaned_server_processes() -> None:
                 if keep_pid is not None and pid == keep_pid:
                     continue
                 subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/F"],
+                    ["taskkill", "/PID", str(pid), "/F", "/T"],
                     capture_output=True,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
+                killed.add(pid)
                 logger.info("Stopped orphaned bundled LLM process (pid=%s)", pid)
+            for pid in _pids_listening_on_port(BUNDLED_LLM_PORT):
+                if keep_pid is not None and pid == keep_pid:
+                    continue
+                if pid in killed:
+                    continue
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F", "/T"],
+                    capture_output=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                logger.info("Stopped process holding bundled port (pid=%s)", pid)
         if keep_pid is None:
             _process = None
     except Exception as e:
@@ -626,9 +681,30 @@ async def start_server() -> bool:
         _set_status(state="missing_model", message="Model not downloaded yet")
         return False
 
-    if await is_server_healthy():
+    expected_ctx = str(serving_n_ctx())
+    marker_ctx = _read_serving_n_ctx_marker()
+    owned = _process is not None and _process.poll() is None
+
+    if (
+        owned
+        and marker_ctx == expected_ctx
+        and await is_server_healthy()
+    ):
         _set_status(state="running", message="Built-in AI is running")
         return True
+
+    if await is_server_healthy() and marker_ctx != expected_ctx:
+        logger.info(
+            "Bundled LLM n_ctx changed (%s -> %s); recycling server",
+            marker_ctx or "unknown",
+            expected_ctx,
+        )
+
+    if _process is not None and _process.poll() is None:
+        stop_server()
+
+    _kill_orphaned_server_processes()
+    await asyncio.sleep(1)
 
     if _process is not None and _process.poll() is None:
         for _ in range(BUNDLED_LLM_START_TIMEOUT):
@@ -638,8 +714,6 @@ async def start_server() -> bool:
             await asyncio.sleep(1)
         _set_status(state="error", error="Server process stuck", message="Failed to start")
         return False
-
-    _kill_orphaned_server_processes()
 
     try:
         import llama_cpp  # noqa: F401
@@ -651,7 +725,7 @@ async def start_server() -> bool:
         )
         return False
 
-    if await is_server_healthy():
+    if await is_server_healthy() and marker_ctx == expected_ctx:
         _set_status(state="running", message="Built-in AI is running")
         register_endpoint()
         return True
@@ -693,7 +767,7 @@ async def start_server() -> bool:
             "--port",
             str(BUNDLED_LLM_PORT),
             "--n_ctx",
-            os.getenv("BUNDLED_LLM_N_CTX", "4096"),
+            os.getenv("BUNDLED_LLM_N_CTX", "8192"),
             "--n_threads",
             n_threads,
             "--n_gpu_layers",
@@ -741,6 +815,7 @@ async def start_server() -> bool:
                 return False
             if await is_server_healthy():
                 _set_status(state="running", message="Built-in AI is ready")
+                _write_serving_n_ctx_marker()
                 register_endpoint()
                 return True
             await asyncio.sleep(1)
@@ -764,7 +839,33 @@ def stop_server() -> None:
         except subprocess.TimeoutExpired:
             _process.kill()
     _process = None
+    marker = _serving_n_ctx_marker()
+    if marker.is_file():
+        try:
+            marker.unlink()
+        except Exception:
+            pass
     _set_status(state="stopped", message="Built-in AI stopped")
+
+
+async def restart_server() -> bool:
+    """Recycle bundled llama_cpp.server (e.g. after n_ctx change)."""
+    stop_server()
+    _kill_orphaned_server_processes()
+    await asyncio.sleep(2)
+    if _pids_listening_on_port(BUNDLED_LLM_PORT):
+        logger.error(
+            "Port %s still in use after restart attempt — "
+            "end the old Python/llama process in Task Manager, then retry.",
+            BUNDLED_LLM_PORT,
+        )
+        _set_status(
+            state="error",
+            error=f"Port {BUNDLED_LLM_PORT} in use",
+            message="Stop the old built-in AI process and restart NeatAi",
+        )
+        return False
+    return await start_server()
 
 
 async def ensure_ready() -> bool:

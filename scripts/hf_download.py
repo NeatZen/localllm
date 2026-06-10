@@ -165,10 +165,13 @@ def main():
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 
     # hf_transfer is flaky on Windows (deprecated env var, cache lock hangs).
-    # Respect an explicit env override; otherwise keep it off on Windows.
+    # Symlinks in HF cache need Developer Mode or admin on Windows (WinError 1314).
+    # Respect explicit env overrides; otherwise use copy-based cache on Windows.
     if sys.platform == "win32":
         os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         os.environ.setdefault("HF_HUB_DOWNLOAD_MAX_WORKERS", "2")
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
     elif os.environ.get("HF_HUB_ENABLE_HF_TRANSFER", "0") == "1":
         try:
             import hf_transfer  # noqa: F401
