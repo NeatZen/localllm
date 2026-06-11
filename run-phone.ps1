@@ -14,15 +14,17 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 # CUDA runtime DLLs for GPU llama-cpp-python (CUDA 13+ uses bin\x64).
-$cudaRoot = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA" -Directory -ErrorAction SilentlyContinue |
-    Sort-Object Name -Descending |
-    Select-Object -First 1
-if ($cudaRoot) {
-    $x64 = Join-Path $cudaRoot.FullName "bin\x64"
-    $bin = Join-Path $cudaRoot.FullName "bin"
-    if (Test-Path $x64) { $env:PATH = "$x64;$env:PATH" }
-    if (Test-Path $bin) { $env:PATH = "$bin;$env:PATH" }
-    $env:CUDA_PATH = $cudaRoot.FullName
+if ($IsWindows) {
+    $cudaRoot = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA" -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
+    if ($cudaRoot) {
+        $x64 = Join-Path $cudaRoot.FullName "bin\x64"
+        $bin = Join-Path $cudaRoot.FullName "bin"
+        if (Test-Path $x64) { $env:PATH = "$x64;$env:PATH" }
+        if (Test-Path $bin) { $env:PATH = "$bin;$env:PATH" }
+        $env:CUDA_PATH = $cudaRoot.FullName
+    }
 }
 
 if (-not (Test-Path ".\venv\Scripts\python.exe")) {
@@ -56,6 +58,30 @@ if (-not $lanIp) {
             Where-Object { $_ -and $_ -notmatch '^127\.' -and $_ -notlike '169.254.*' } |
             Select-Object -First 1
         )
+    } catch {}
+}
+
+# Linux / macOS fallback (Get-NetIPAddress is Windows-only).
+if (-not $lanIp -and -not $IsWindows) {
+    try {
+        $raw = (& hostname -I 2>$null)
+        if ($raw) {
+            foreach ($candidate in ($raw.ToString().Trim() -split '\s+')) {
+                if ($candidate -and $candidate -notmatch '^127\.' -and $candidate -notlike '169.254.*') {
+                    $lanIp = $candidate
+                    break
+                }
+            }
+        }
+    } catch {}
+}
+
+if (-not $lanIp -and -not $IsWindows) {
+    try {
+        $routeOut = (& ip -4 route get 1.1.1.1 2>$null | Out-String)
+        if ($routeOut -match 'src\s+(\d{1,3}(?:\.\d{1,3}){3})') {
+            $lanIp = $Matches[1]
+        }
     } catch {}
 }
 

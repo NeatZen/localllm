@@ -48,10 +48,22 @@ app = FastAPI(
 )
 
 # ========= CORS =========
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
+allowed_origins = [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1").split(",")
+    if o.strip()
+]
+# Phone/LAN access (run-phone.ps1): allow private-network origins with credentials.
+_private_lan_origin_re = (
+    r"^https?://"
+    r"(localhost|127\.0\.0\.1|"
+    r"192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+    r"172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})"
+    r"(?::\d+)?$"
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=_private_lan_origin_re,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
@@ -197,7 +209,8 @@ if AUTH_ENABLED:
                     # present. Without this, /api/auth/status sees the cookie
                     # (exempt route) but get_current_user() stays empty and
                     # strict routes 401 — the UI ping-pongs / ↔ /login.
-                    token = request.cookies.get(SESSION_COOKIE)
+                    from src.auth_helpers import get_session_token_from_request as _gst
+                    token = _gst(request)
                     if token and auth_manager.validate_token(token):
                         request.state.current_user = auth_manager.get_username_for_token(token)
                         request.state.api_token = False
@@ -263,8 +276,9 @@ if AUTH_ENABLED:
                 # Invalid bearer token — reject immediately
                 return JSONResponse(status_code=401, content={"error": "Invalid API token"})
 
-            # --- Cookie-based session auth ---
-            token = request.cookies.get(SESSION_COOKIE)
+            # --- Cookie-based session auth (cookie or LAN/mobile header) ---
+            from src.auth_helpers import get_session_token_from_request as _gst
+            token = _gst(request)
             if not auth_manager.validate_token(token):
                 if path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"error": "Not authenticated"})

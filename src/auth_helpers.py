@@ -5,6 +5,16 @@ from fastapi import Request, HTTPException
 
 # Must match routes.auth_routes.SESSION_COOKIE
 _SESSION_COOKIE = "neatai_session"
+_SESSION_HEADER = "X-NeatAi-Session"
+
+
+def get_session_token_from_request(request: Request) -> Optional[str]:
+    """Resolve session token from HttpOnly cookie or LAN/mobile header fallback."""
+    token = request.cookies.get(_SESSION_COOKIE)
+    if token:
+        return token
+    hdr = (request.headers.get(_SESSION_HEADER) or "").strip()
+    return hdr or None
 
 
 def _user_from_session_cookie(request: Request) -> Optional[str]:
@@ -14,7 +24,7 @@ def _user_from_session_cookie(request: Request) -> Optional[str]:
         auth_mgr = getattr(request.app.state, "auth_manager", None)
         if auth_mgr is None or not getattr(auth_mgr, "is_configured", False):
             return None
-        token = request.cookies.get(_SESSION_COOKIE)
+        token = get_session_token_from_request(request)
         if not token or not auth_mgr.validate_token(token):
             return None
         return auth_mgr.get_username_for_token(token)
